@@ -654,6 +654,7 @@ mod tests {
         Session {
             status,
             tool: None,
+            desc: None,
             msg: None,
             ts,
             seq: 0,

@@ -138,10 +138,14 @@ fn render_column(
             match session.status {
                 Status::Starting | Status::Working => {
                     if let Some(ref tool) = session.tool {
+                        let line2 = match session.desc {
+                            Some(ref d) => format!("{tool}: {d}"),
+                            None => tool.clone(),
+                        };
                         buf.set_string(
                             lx,
                             y,
-                            truncate_str(tool, avail),
+                            truncate_str(&line2, avail),
                             tool_style().patch(bg),
                         );
                     }
@@ -227,6 +231,7 @@ mod tests {
         Session {
             status,
             tool: None,
+            desc: None,
             msg: None,
             ts,
             seq: 1,
@@ -361,6 +366,47 @@ mod tests {
     #[test]
     fn truncate_zero_max() {
         assert_eq!(truncate_str("hello", 0), "");
+    }
+
+    #[test]
+    fn render_card_shows_tool_with_desc() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = make_session(Status::Working, 980);
+        session.tool = Some("Bash".to_string());
+        session.desc = Some("Install dependencies".to_string());
+        write_session_to(dir.path(), "builder", &session).unwrap();
+
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        render_kanban(&app, area, &mut buf, 1000);
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Bash: Install dependencies"),
+            "should show 'Tool: desc', got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_card_shows_tool_only_without_desc() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = make_session(Status::Working, 980);
+        session.tool = Some("Bash".to_string());
+        // desc is None (default from make_session)
+        write_session_to(dir.path(), "runner", &session).unwrap();
+
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        render_kanban(&app, area, &mut buf, 1000);
+
+        let text = buffer_text(&buf);
+        assert!(text.contains("Bash"), "should still show tool name");
+        assert!(
+            !text.contains("Bash:"),
+            "should NOT show colon when no desc"
+        );
     }
 
     #[test]
