@@ -1,4 +1,4 @@
-#!usr/bin/env bash
+#!/usr/bin/env bash
 
 set -e
 
@@ -20,11 +20,12 @@ for ((i=1; i<=$1; i++)); do
 
   ralph_commits=$(git log --grep="RALPH" -n 10 --format="%H%n%ad%n%B---" --date=short 2>/dev/null || echo "No RALPH commits found")
 
-  claude . -- \
+  claude \
+    --dangerously-skip-permissions \
     --verbose \
     --print \
     --output-format stream-json \
-    "@plans/prompt.md Previous RALPH commits: $ralph_commits" \
+    "@prompt.md Previous RALPH commits: $ralph_commits" \
   | grep --line-buffered '^{' \
   | tee "$tmpfile" \
   | jq --unbuffered -rj "$stream_text"
