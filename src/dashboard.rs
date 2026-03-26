@@ -222,6 +222,28 @@ impl App {
                 .retain(|name, _| self.sessions.contains_key(name));
 
             self.clamp_selections();
+
+            // Auto-focus a session created from the dashboard modal
+            if let Some(ref focus_name) = self.pending_focus {
+                if self.sessions.contains_key(focus_name) {
+                    let focus_name = focus_name.clone();
+                    self.pending_focus = None;
+                    // Find which column it's in and focus it
+                    let col = self
+                        .sessions
+                        .get(&focus_name)
+                        .map(|s| self.effective_column(&focus_name, s))
+                        .unwrap_or(Column::Working);
+                    let visible = self.visible_columns();
+                    if let Some(col_idx) = visible.iter().position(|c| *c == col) {
+                        self.selected_column = col_idx;
+                        let entries = self.sessions_in_column(col);
+                        if let Some(row) = entries.iter().position(|(n, _)| *n == focus_name) {
+                            self.selected_rows.insert(col, row);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -472,8 +494,10 @@ fn run_loop(
     while !app.should_quit {
         terminal.draw(|frame| {
             let area = frame.area();
+            let modal_height = if app.input_mode == InputMode::NewSession { 4 } else { 2 };
             let chunks =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(area);
+                Layout::vertical([Constraint::Min(0), Constraint::Length(modal_height)])
+                    .split(area);
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -481,7 +505,11 @@ fn run_loop(
                 .as_secs();
 
             crate::ui::kanban::render_kanban(app, chunks[0], frame.buffer_mut(), now);
-            crate::ui::statusbar::render_statusbar(app, chunks[1], frame.buffer_mut());
+            if app.input_mode == InputMode::NewSession {
+                crate::ui::modal::render_modal(app, chunks[1], frame.buffer_mut());
+            } else {
+                crate::ui::statusbar::render_statusbar(app, chunks[1], frame.buffer_mut());
+            }
         })?;
 
         // Poll for keyboard events (1-second timeout for age/debounce refresh)
@@ -489,26 +517,56 @@ fn run_loop(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            match key.code {
-                KeyCode::Char('q') => app.should_quit = true,
-                KeyCode::Char('j') => app.move_down(),
-                KeyCode::Char('k') => app.move_up(),
-                KeyCode::Char('h') => app.move_left(),
-                KeyCode::Char('l') => app.move_right(),
-                KeyCode::Enter => {
-                    if let Some(name) = app.selected_session() {
-                        let name = name.to_owned();
-                        let _ = crate::zellij::go_to_tab(&name);
+            match app.input_mode {
+                InputMode::Normal => match key.code {
+                    KeyCode::Char('q') => app.should_quit = true,
+                    KeyCode::Char('j') => app.move_down(),
+                    KeyCode::Char('k') => app.move_up(),
+                    KeyCode::Char('h') => app.move_left(),
+                    KeyCode::Char('l') => app.move_right(),
+                    KeyCode::Char('n') => {
+                        let cwd = app.default_cwd.clone();
+                        app.open_new_session_modal(&cwd);
                     }
-                }
-                KeyCode::Char('x') => {
-                    if let Some(name) = app.selected_session() {
-                        let name = name.to_owned();
-                        let _ = crate::zellij::close_tab(&name);
-                        let _ = registry::remove_session(&name);
+                    KeyCode::Enter => {
+                        if let Some(name) = app.selected_session() {
+                            let name = name.to_owned();
+                            let _ = crate::zellij::go_to_tab(&name);
+                        }
                     }
-                }
-                _ => {}
+                    KeyCode::Char('x') => {
+                        if let Some(name) = app.selected_session() {
+                            let name = name.to_owned();
+                            let _ = crate::zellij::close_tab(&name);
+                            let _ = registry::remove_session(&name);
+                        }
+                    }
+                    _ => {}
+                },
+                InputMode::NewSession => match key.code {
+                    KeyCode::Esc => app.close_modal(),
+                    KeyCode::Tab | KeyCode::BackTab => app.modal_toggle_field(),
+                    KeyCode::Backspace => app.modal_pop_char(),
+                    KeyCode::Enter => {
+                        if let Ok((name, dir)) = app.validate_modal() {
+                            let env_var = format!("CCMUX_SESSION={name}");
+                            let result = crate::zellij::new_tab(
+                                &name,
+                                "env",
+                                &[&env_var, "claude", "--dangerously-skip-permissions"],
+                                Some(&dir),
+                            );
+                            if let Err(e) = result {
+                                app.modal_error = Some(format!("failed to create session: {e}"));
+                            } else {
+                                app.pending_focus = Some(name.clone());
+                                app.close_modal();
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) => app.modal_push_char(c),
+                    _ => {}
+                },
             }
         }
 
