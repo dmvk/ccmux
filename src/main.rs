@@ -49,7 +49,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init => todo!("init"),
-        Commands::New { name: _ } => todo!("new"),
+        Commands::New { ref name } => {
+            registry::validate_session_name(name)?;
+            todo!("new: launch zellij tab")
+        }
         Commands::Attach { name: _ } => todo!("attach"),
         Commands::Kill { name: _ } => todo!("kill"),
         Commands::List => todo!("list"),
