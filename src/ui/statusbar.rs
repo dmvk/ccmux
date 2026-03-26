@@ -65,7 +65,7 @@ pub fn render_statusbar(app: &App, area: Rect, buf: &mut Buffer) {
 
     // Line 2: key bindings
     if area.height >= 2 {
-        let help = "h/j/k/l navigate \u{00b7} Enter attach \u{00b7} Ctrl+y back \u{00b7} x kill \u{00b7} q quit";
+        let help = "h/j/k/l navigate \u{00b7} Enter attach \u{00b7} n new \u{00b7} x kill \u{00b7} Ctrl+y back \u{00b7} q quit";
         let x = area.x + 1;
         let y = area.y + 1;
         let w = area.width.saturating_sub(1) as usize;
