@@ -94,6 +94,6 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Emit { ref status } => emit::run(status),
-        Commands::Dashboard => todo!("dashboard"),
+        Commands::Dashboard => dashboard::run(),
     }
 }

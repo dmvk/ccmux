@@ -3,8 +3,13 @@
 
 use crate::registry::{self, Session, Status};
 use anyhow::{Context, Result};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
+use ratatui::Terminal;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -317,6 +322,88 @@ impl App {
             }
         }
     }
+}
+
+/// Run the dashboard TUI event loop per PRD §10.
+///
+/// Single-threaded poll loop: crossterm::event::poll() with 1-second timeout.
+/// Each tick: drain keyboard events, drain file watcher events, process debounce.
+pub fn run() -> Result<()> {
+    enable_raw_mode().context("failed to enable raw mode")?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(stdout, EnterAlternateScreen)
+        .context("failed to enter alternate screen")?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut app = App::new()?;
+    let result = run_loop(&mut terminal, &mut app);
+
+    // Restore terminal (always runs, even on error)
+    let _ = disable_raw_mode();
+    let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
+
+    result
+}
+
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    while !app.should_quit {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let chunks =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(area);
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            crate::ui::kanban::render_kanban(app, chunks[0], frame.buffer_mut(), now);
+            crate::ui::statusbar::render_statusbar(app, chunks[1], frame.buffer_mut());
+        })?;
+
+        // Poll for keyboard events (1-second timeout for age/debounce refresh)
+        if event::poll(Duration::from_secs(1))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') => app.should_quit = true,
+                KeyCode::Char('j') => app.move_down(),
+                KeyCode::Char('k') => app.move_up(),
+                KeyCode::Char('h') => app.move_left(),
+                KeyCode::Char('l') => app.move_right(),
+                KeyCode::Enter => {
+                    if let Some(name) = app.selected_session() {
+                        let name = name.to_owned();
+                        let _ = crate::zellij::go_to_tab(&name);
+                    }
+                }
+                KeyCode::Char('x') => {
+                    if let Some(name) = app.selected_session() {
+                        let name = name.to_owned();
+                        let _ = crate::zellij::close_tab(&name);
+                        let _ = registry::remove_session(&name);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Drain file watcher events and reload sessions
+        app.process_watcher_events();
+
+        // Process debounce timers and auto-focus newly waiting sessions
+        let newly_waiting = app.process_debounce_timers();
+        if let Some(name) = newly_waiting.last() {
+            app.auto_focus_session(name);
+        }
+    }
+
+    Ok(())
 }
 
 /// Return the status icon for a session per PRD §8.
