@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Attach { name: _ } => todo!("attach"),
         Commands::Kill { name: _ } => todo!("kill"),
         Commands::List => todo!("list"),
-        Commands::Emit { status: _ } => todo!("emit"),
+        Commands::Emit { ref status } => emit::run(status),
         Commands::Dashboard => todo!("dashboard"),
     }
 }
