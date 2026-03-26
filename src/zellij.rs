@@ -43,15 +43,30 @@ pub fn go_to_tab(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Check whether a Zellij tab with the given name exists.
+///
+/// Uses `zellij action query-tab-names` and checks if the name appears in the output.
+pub fn tab_exists(name: &str) -> Result<bool> {
+    let output = Command::new("zellij")
+        .args(["action", "query-tab-names"])
+        .output()
+        .context("failed to run zellij action query-tab-names — is zellij installed and running?")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.lines().any(|line| line.trim() == name))
+}
+
 /// Close the Zellij tab with the given name.
 ///
-/// Navigates to the tab first. If the tab doesn't exist (go_to_tab fails),
+/// Checks if the tab exists first via `query-tab-names`. If it doesn't exist,
 /// returns Ok(()) without closing anything — avoids killing the current tab.
+/// (`go-to-tab-name` returns exit 0 for nonexistent tabs, so we can't rely on it.)
 pub fn close_tab(name: &str) -> Result<()> {
-    // Navigate to the tab first — if it doesn't exist, bail early
-    if go_to_tab(name).is_err() {
+    // Check if tab exists — go-to-tab-name returns 0 even for missing tabs
+    if !tab_exists(name)? {
         return Ok(());
     }
+
+    let _ = go_to_tab(name);
 
     let status = Command::new("zellij")
         .args(["action", "close-tab"])
