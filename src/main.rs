@@ -59,7 +59,12 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Attach { ref name } => zellij::go_to_tab(name),
-        Commands::Kill { name: _ } => todo!("kill"),
+        Commands::Kill { ref name } => {
+            // Close Zellij tab (best-effort — tab may not exist if not in Zellij)
+            let _ = zellij::close_tab(name);
+            registry::remove_session(name)?;
+            Ok(())
+        }
         Commands::List => {
             let sessions = registry::list_sessions()?;
             if sessions.is_empty() {

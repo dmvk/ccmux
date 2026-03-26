@@ -76,6 +76,21 @@ pub fn write_session_atomic(name: &str, session: &Session) -> Result<()> {
     write_session_to(&registry_dir()?, name, session)
 }
 
+/// Remove a session file from a given directory. Returns Ok(()) even if the file doesn't exist.
+pub fn remove_session_from(dir: &std::path::Path, name: &str) -> Result<()> {
+    let path = dir.join(format!("{name}.json"));
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("failed to remove session file: {}", path.display())),
+    }
+}
+
+/// Remove a session file from the default registry directory.
+pub fn remove_session(name: &str) -> Result<()> {
+    remove_session_from(&registry_dir()?, name)
+}
+
 /// List all sessions in a given directory. Returns (name, Session) pairs.
 pub fn list_sessions_from(dir: &std::path::Path) -> Result<Vec<(String, Session)>> {
     if !dir.exists() {
@@ -346,5 +361,30 @@ mod tests {
         assert!(!dir.path().join(".clean.json.tmp").exists());
         // The target file should exist
         assert!(dir.path().join("clean.json").exists());
+    }
+
+    #[test]
+    fn remove_session_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session {
+            status: Status::Working,
+            tool: None,
+            msg: None,
+            ts: 0,
+            seq: 0,
+            dir: None,
+        };
+        write_session_to(dir.path(), "doomed", &session).unwrap();
+        assert!(dir.path().join("doomed.json").exists());
+
+        remove_session_from(dir.path(), "doomed").unwrap();
+        assert!(!dir.path().join("doomed.json").exists());
+    }
+
+    #[test]
+    fn remove_session_nonexistent_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        // Should not error when file doesn't exist
+        remove_session_from(dir.path(), "ghost").unwrap();
     }
 }
