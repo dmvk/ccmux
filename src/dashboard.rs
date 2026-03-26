@@ -545,7 +545,7 @@ fn run_loop(
                             let result = crate::zellij::new_tab(
                                 &name,
                                 "env",
-                                &[&env_var, "claude", "--dangerously-skip-permissions"],
+                                &[&env_var, "claude", "--dangerously-skip-permissions", "--worktree"],
                                 Some(&dir),
                             );
                             if let Err(e) = result {
