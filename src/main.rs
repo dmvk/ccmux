@@ -58,7 +58,7 @@ fn main() -> anyhow::Result<()> {
             zellij::new_tab(name, "env", &[&env_var, "claude"])?;
             Ok(())
         }
-        Commands::Attach { name: _ } => todo!("attach"),
+        Commands::Attach { ref name } => zellij::go_to_tab(name),
         Commands::Kill { name: _ } => todo!("kill"),
         Commands::List => {
             let sessions = registry::list_sessions()?;
