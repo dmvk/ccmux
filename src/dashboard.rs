@@ -318,6 +318,17 @@ impl App {
     }
 }
 
+/// Return the status icon for a session per PRD §8.
+/// `?` waiting, `●` working/starting, `○` idle, `✓` done.
+pub fn status_icon(status: &Status) -> &'static str {
+    match status {
+        Status::Waiting => "?",
+        Status::Starting | Status::Working => "●",
+        Status::Idle => "○",
+        Status::Done => "✓",
+    }
+}
+
 /// Format a session's age relative to `now` as a compact string.
 /// Returns seconds (e.g. "43s"), minutes ("14m"), or hours ("2h").
 pub fn format_age(ts: u64, now: u64) -> String {
@@ -828,5 +839,32 @@ mod tests {
     fn format_age_future_timestamp_saturates() {
         // If ts is in the future (clock skew), saturating_sub gives 0
         assert_eq!(format_age(2000, 1000), "0s");
+    }
+
+    // --- Status icon tests ---
+
+    #[test]
+    fn status_icon_waiting() {
+        assert_eq!(status_icon(&Status::Waiting), "?");
+    }
+
+    #[test]
+    fn status_icon_working() {
+        assert_eq!(status_icon(&Status::Working), "●");
+    }
+
+    #[test]
+    fn status_icon_starting_groups_with_working() {
+        assert_eq!(status_icon(&Status::Starting), "●");
+    }
+
+    #[test]
+    fn status_icon_idle() {
+        assert_eq!(status_icon(&Status::Idle), "○");
+    }
+
+    #[test]
+    fn status_icon_done() {
+        assert_eq!(status_icon(&Status::Done), "✓");
     }
 }
