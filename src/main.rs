@@ -1,5 +1,6 @@
 mod dashboard;
 mod emit;
+mod init;
 pub mod registry;
 mod ui;
 mod zellij;
@@ -48,7 +49,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init => todo!("init"),
+        Commands::Init => init::run(),
         Commands::New { ref name } => {
             registry::validate_session_name(name)?;
             if registry::read_session(name)?.is_some() {
