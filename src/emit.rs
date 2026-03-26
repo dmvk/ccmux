@@ -27,6 +27,7 @@ struct HookPayload {
     tool_desc: Option<String>,
     message: Option<String>,
     cwd: Option<String>,
+    session_id: Option<String>,
 }
 
 fn parse_stdin_payload(stdin_data: &str) -> HookPayload {
@@ -62,11 +63,17 @@ fn parse_stdin_payload(stdin_data: &str) -> HookPayload {
         })
         .map(|s| truncate(s, 80).to_string());
 
+    let session_id = val
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     HookPayload {
         tool_name,
         tool_desc,
         message,
         cwd,
+        session_id,
     }
 }
 
@@ -148,6 +155,13 @@ pub fn emit_to(
         None
     };
 
+    // session_id: set on --status starting, preserved on subsequent writes
+    let session_id = if status == Status::Starting {
+        payload.session_id.or_else(|| existing.as_ref().and_then(|s| s.session_id.clone()))
+    } else {
+        existing.as_ref().and_then(|s| s.session_id.clone())
+    };
+
     let session = Session {
         status,
         tool,
@@ -156,6 +170,7 @@ pub fn emit_to(
         ts,
         seq,
         dir,
+        session_id,
     };
 
     registry::write_session_to(registry_dir, session_name, &session)?;

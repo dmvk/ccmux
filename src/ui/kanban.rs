@@ -252,6 +252,7 @@ mod tests {
             ts,
             seq: 1,
             dir: Some("~/project".to_string()),
+            session_id: None,
         }
     }
 

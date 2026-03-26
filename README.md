@@ -49,7 +49,7 @@ Add `Ctrl+Y` to return to the dashboard from any session tab. In `~/.config/zell
 ```kdl
 keybinds {
     shared_except "locked" {
-        bind "Ctrl y" { GoToTabName "dashboard"; }
+        bind "Ctrl y" { GoToTab 1; }
     }
 }
 ```

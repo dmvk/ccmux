@@ -23,6 +23,8 @@ pub struct Session {
     pub ts: u64,
     pub seq: u64,
     pub dir: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// Returns the registry directory: `~/.ccmux/`
@@ -203,6 +205,7 @@ mod tests {
             ts: 1711234567,
             seq: 42,
             dir: Some("~/project".into()),
+            session_id: None,
         };
         let json = serde_json::to_string(&session).unwrap();
         let deserialized: Session = serde_json::from_str(&json).unwrap();
@@ -222,6 +225,7 @@ mod tests {
             ts: 1711234567,
             seq: 5,
             dir: Some("/home/user/project".into()),
+            session_id: None,
         };
         write_session_to(dir.path(), "test", &session).unwrap();
         let read_back = read_session_from(dir.path(), "test").unwrap().unwrap();
@@ -271,6 +275,7 @@ mod tests {
             ts: 100,
             seq: 1,
             dir: Some("/project".into()),
+            session_id: None,
         };
         let s2 = Session {
             status: Status::Waiting,
@@ -280,6 +285,7 @@ mod tests {
             ts: 200,
             seq: 3,
             dir: Some("/other".into()),
+            session_id: None,
         };
         write_session_to(dir.path(), "alpha", &s1).unwrap();
         write_session_to(dir.path(), "beta", &s2).unwrap();
@@ -303,6 +309,7 @@ mod tests {
             ts: 0,
             seq: 0,
             dir: None,
+            session_id: None,
         };
         write_session_to(dir.path(), "good", &s1).unwrap();
         std::fs::write(dir.path().join("bad.json"), "not json").unwrap();
@@ -323,6 +330,7 @@ mod tests {
             ts: 0,
             seq: 0,
             dir: None,
+            session_id: None,
         };
         write_session_to(dir.path(), "real", &s1).unwrap();
         std::fs::write(dir.path().join("readme.txt"), "ignore me").unwrap();
@@ -343,6 +351,7 @@ mod tests {
             ts: 0,
             seq: 0,
             dir: None,
+            session_id: None,
         };
         write_session_to(dir.path(), "sess", &s1).unwrap();
         // Simulate a leftover temp file
@@ -364,6 +373,7 @@ mod tests {
             ts: 0,
             seq: 0,
             dir: None,
+            session_id: None,
         };
         write_session_to(dir.path(), "clean", &session).unwrap();
         // The temp file should be gone after rename
@@ -383,6 +393,7 @@ mod tests {
             ts: 0,
             seq: 0,
             dir: None,
+            session_id: None,
         };
         write_session_to(dir.path(), "doomed", &session).unwrap();
         assert!(dir.path().join("doomed.json").exists());
@@ -408,6 +419,7 @@ mod tests {
             ts: 100,
             seq: 1,
             dir: Some("/project".into()),
+            session_id: None,
         };
         let json = serde_json::to_string(&session).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();

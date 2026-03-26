@@ -24,11 +24,13 @@ pub enum Column {
     Done,
 }
 
-/// Dashboard input mode — Normal for kanban navigation, NewSession for the modal.
+/// Dashboard input mode — Normal for kanban navigation, NewSession for the modal,
+/// Preview for the transcript preview panel.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputMode {
     Normal,
     NewSession,
+    Preview,
 }
 
 /// Column display order (left to right).
@@ -94,6 +96,10 @@ pub struct App {
     pub default_cwd: String,
     /// Session name to auto-focus on next watcher reload (set when creating from modal).
     pub pending_focus: Option<String>,
+    /// Cached preview lines for the transcript panel.
+    pub preview_lines: Vec<String>,
+    /// Name of the session being previewed.
+    pub preview_session: Option<String>,
 }
 
 impl App {
@@ -139,6 +145,8 @@ impl App {
                 .to_string_lossy()
                 .to_string(),
             pending_focus: None,
+            preview_lines: Vec::new(),
+            preview_session: None,
         };
 
         app.focus_initial_column();
@@ -399,6 +407,41 @@ impl App {
         self.modal_error = None;
     }
 
+    /// Open the transcript preview for the currently selected session.
+    pub fn open_preview(&mut self) {
+        if let Some(name) = self.selected_session() {
+            self.preview_session = Some(name.to_string());
+            self.input_mode = InputMode::Preview;
+            self.refresh_preview();
+        }
+    }
+
+    /// Close the transcript preview and return to normal mode.
+    pub fn close_preview(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.preview_lines.clear();
+        self.preview_session = None;
+    }
+
+    /// Refresh the preview panel by re-reading the transcript tail.
+    pub fn refresh_preview(&mut self) {
+        if let Some(ref name) = self.preview_session {
+            if let Some(session) = self.sessions.get(name) {
+                if let (Some(dir), Some(sid)) = (&session.dir, &session.session_id) {
+                    if let Some(path) = crate::transcript::transcript_path(dir, sid) {
+                        let entries = crate::transcript::read_tail_all(&path, 50);
+                        self.preview_lines = entries
+                            .iter()
+                            .map(crate::transcript::format_entry)
+                            .collect();
+                        return;
+                    }
+                }
+            }
+            self.preview_lines = vec!["(transcript not available)".to_string()];
+        }
+    }
+
     /// Returns the currently active modal text buffer (name or dir).
     pub fn active_modal_buffer(&self) -> &str {
         if self.modal_field == 0 {
@@ -499,21 +542,29 @@ fn run_loop(
     while !app.should_quit {
         terminal.draw(|frame| {
             let area = frame.area();
-            let modal_height = if app.input_mode == InputMode::NewSession { 4 } else { 2 };
-            let chunks =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(modal_height)])
-                    .split(area);
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
 
-            crate::ui::kanban::render_kanban(app, chunks[0], frame.buffer_mut(), now);
-            if app.input_mode == InputMode::NewSession {
-                crate::ui::modal::render_modal(app, chunks[1], frame.buffer_mut());
+            if app.input_mode == InputMode::Preview {
+                let chunks =
+                    Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
+                        .split(area);
+                crate::ui::kanban::render_kanban(app, chunks[0], frame.buffer_mut(), now);
+                crate::ui::preview::render_preview(app, chunks[1], frame.buffer_mut());
             } else {
-                crate::ui::statusbar::render_statusbar(app, chunks[1], frame.buffer_mut());
+                let modal_height = if app.input_mode == InputMode::NewSession { 4 } else { 2 };
+                let chunks =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(modal_height)])
+                        .split(area);
+                crate::ui::kanban::render_kanban(app, chunks[0], frame.buffer_mut(), now);
+                if app.input_mode == InputMode::NewSession {
+                    crate::ui::modal::render_modal(app, chunks[1], frame.buffer_mut());
+                } else {
+                    crate::ui::statusbar::render_statusbar(app, chunks[1], frame.buffer_mut());
+                }
             }
         })?;
 
@@ -546,6 +597,11 @@ fn run_loop(
                             let _ = registry::remove_session(&name);
                         }
                     }
+                    KeyCode::Char('p') => app.open_preview(),
+                    _ => {}
+                },
+                InputMode::Preview => match key.code {
+                    KeyCode::Esc => app.close_preview(),
                     _ => {}
                 },
                 InputMode::NewSession => match key.code {
@@ -582,6 +638,11 @@ fn run_loop(
         let newly_waiting = app.process_debounce_timers();
         if let Some(name) = newly_waiting.last() {
             app.auto_focus_session(name);
+        }
+
+        // Refresh preview transcript on each tick
+        if app.input_mode == InputMode::Preview {
+            app.refresh_preview();
         }
     }
 
@@ -672,6 +733,7 @@ mod tests {
             ts,
             seq: 0,
             dir: None,
+            session_id: None,
         }
     }
 

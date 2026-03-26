@@ -65,7 +65,7 @@ pub fn render_statusbar(app: &App, area: Rect, buf: &mut Buffer) {
 
     // Line 2: key bindings
     if area.height >= 2 {
-        let help = "h/j/k/l navigate \u{00b7} Enter attach \u{00b7} n new \u{00b7} x kill \u{00b7} Ctrl+y back \u{00b7} q quit";
+        let help = "h/j/k/l navigate \u{00b7} Enter attach \u{00b7} n new \u{00b7} p preview \u{00b7} x kill \u{00b7} Ctrl+y back \u{00b7} q quit";
         let x = area.x + 1;
         let y = area.y + 1;
         let w = area.width.saturating_sub(1) as usize;
@@ -107,6 +107,7 @@ mod tests {
             ts,
             seq: 1,
             dir: Some("~/speedbets/trading".to_string()),
+            session_id: None,
         }
     }
 
@@ -167,13 +168,14 @@ mod tests {
         write_session_to(dir.path(), "infra", &session).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        let area = Rect::new(0, 0, 80, 2);
+        let area = Rect::new(0, 0, 100, 2);
         let mut buf = Buffer::empty(area);
         render_statusbar(&app, area, &mut buf);
 
         let text = buffer_text(&buf);
         assert!(text.contains("h/j/k/l"), "navigation keys present");
         assert!(text.contains("Enter attach"), "enter hint present");
+        assert!(text.contains("p preview"), "preview hint present");
         assert!(text.contains("q quit"), "quit hint present");
     }
 

@@ -2,6 +2,7 @@ mod dashboard;
 mod emit;
 mod init;
 pub mod registry;
+mod transcript;
 mod ui;
 mod zellij;
 
