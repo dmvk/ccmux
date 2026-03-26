@@ -4,7 +4,7 @@
 // parses the hook JSON payload from stdin, and atomically writes the session file.
 
 use anyhow::{bail, Result};
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::registry::{self, Session, Status};
@@ -77,15 +77,29 @@ pub fn run(status_str: &str) -> Result<()> {
         _ => return Ok(()),
     };
 
-    let status = parse_status(status_str)?;
-
-    // Read stdin (hook JSON payload)
+    // Read stdin (hook JSON payload) — skip when stdin is a terminal (interactive use)
     let mut stdin_data = String::new();
-    std::io::stdin().read_to_string(&mut stdin_data)?;
-    let payload = parse_stdin_payload(&stdin_data);
+    if !std::io::stdin().is_terminal() {
+        std::io::stdin().read_to_string(&mut stdin_data)?;
+    }
+
+    let dir = registry::registry_dir()?;
+    emit_to(&dir, &session_name, status_str, &stdin_data)
+}
+
+/// Core emit logic: parse status + payload, build session, write to registry dir.
+/// Factored out of `run` so integration tests can call it directly.
+pub fn emit_to(
+    registry_dir: &std::path::Path,
+    session_name: &str,
+    status_str: &str,
+    stdin_data: &str,
+) -> Result<()> {
+    let status = parse_status(status_str)?;
+    let payload = parse_stdin_payload(stdin_data);
 
     // Read existing session to carry forward seq and dir
-    let existing = registry::read_session(&session_name)?;
+    let existing = registry::read_session_from(registry_dir, session_name)?;
 
     let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let seq = existing.as_ref().map_or(0, |s| s.seq + 1);
@@ -120,13 +134,149 @@ pub fn run(status_str: &str) -> Result<()> {
         dir,
     };
 
-    registry::write_session_atomic(&session_name, &session)?;
+    registry::write_session_to(registry_dir, session_name, &session)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::App;
+
+    // ── emit_to unit tests ──────────────────────────────────────────
+
+    #[test]
+    fn emit_to_writes_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        emit_to(dir.path(), "s1", "starting", r#"{"cwd":"/tmp"}"#).unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1")
+            .unwrap()
+            .expect("session file should exist");
+        assert_eq!(session.status, Status::Starting);
+        assert_eq!(session.dir.as_deref(), Some("/tmp"));
+        assert_eq!(session.seq, 0);
+    }
+
+    #[test]
+    fn emit_to_increments_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        emit_to(dir.path(), "s1", "starting", "{}").unwrap();
+        emit_to(dir.path(), "s1", "working", r#"{"tool_name":"Bash"}"#).unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.seq, 1);
+    }
+
+    #[test]
+    fn emit_to_preserves_dir_across_transitions() {
+        let dir = tempfile::tempdir().unwrap();
+        emit_to(dir.path(), "s1", "starting", r#"{"cwd":"/project"}"#).unwrap();
+        emit_to(dir.path(), "s1", "working", r#"{"tool_name":"Edit"}"#).unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.dir.as_deref(), Some("/project"));
+    }
+
+    #[test]
+    fn emit_to_rejects_invalid_status() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(emit_to(dir.path(), "s1", "bogus", "{}").is_err());
+    }
+
+    #[test]
+    fn emit_to_with_empty_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        emit_to(dir.path(), "s1", "idle", "").unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.status, Status::Idle);
+    }
+
+    // ── e2e: emit → dashboard visibility ────────────────────────────
+
+    #[test]
+    fn emitted_session_appears_in_dashboard() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Simulate the full hook lifecycle
+        emit_to(dir.path(), "trader", "starting", r#"{"cwd":"/home/bob/trade"}"#).unwrap();
+        emit_to(dir.path(), "trader", "working", r#"{"tool_name":"Bash"}"#).unwrap();
+
+        // Dashboard should see the session
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        assert!(
+            app.sessions.contains_key("trader"),
+            "dashboard must show the emitted session"
+        );
+        let session = &app.sessions["trader"];
+        assert_eq!(session.status, Status::Working);
+        assert_eq!(session.tool.as_deref(), Some("Bash"));
+        assert_eq!(session.dir.as_deref(), Some("/home/bob/trade"));
+    }
+
+    #[test]
+    fn multiple_sessions_appear_in_dashboard_columns() {
+        let dir = tempfile::tempdir().unwrap();
+
+        emit_to(dir.path(), "alpha", "working", r#"{"tool_name":"Edit"}"#).unwrap();
+        emit_to(dir.path(), "beta", "waiting", r#"{"message":"Approve?"}"#).unwrap();
+        emit_to(dir.path(), "gamma", "done", "{}").unwrap();
+
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        assert_eq!(app.sessions.len(), 3);
+
+        // Check column assignments
+        use crate::dashboard::Column;
+        let working = app.sessions_in_column(Column::Working);
+        let waiting = app.sessions_in_column(Column::Waiting);
+        let done = app.sessions_in_column(Column::Done);
+
+        assert_eq!(working.len(), 1);
+        assert_eq!(working[0].0, "alpha");
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].0, "beta");
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].0, "gamma");
+    }
+
+    #[test]
+    fn session_lifecycle_updates_dashboard() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Start → Working → Waiting → Idle → Done
+        emit_to(dir.path(), "s1", "starting", r#"{"cwd":"/proj"}"#).unwrap();
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        assert_eq!(app.sessions["s1"].status, Status::Starting);
+
+        emit_to(dir.path(), "s1", "working", r#"{"tool_name":"Bash"}"#).unwrap();
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        assert_eq!(app.sessions["s1"].status, Status::Working);
+        assert_eq!(app.sessions["s1"].tool.as_deref(), Some("Bash"));
+
+        emit_to(dir.path(), "s1", "waiting", r#"{"message":"Continue?"}"#).unwrap();
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        assert_eq!(app.sessions["s1"].status, Status::Waiting);
+        assert_eq!(app.sessions["s1"].msg.as_deref(), Some("Continue?"));
+
+        emit_to(dir.path(), "s1", "idle", "{}").unwrap();
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        assert_eq!(app.sessions["s1"].status, Status::Idle);
+
+        emit_to(dir.path(), "s1", "done", "{}").unwrap();
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        assert_eq!(app.sessions["s1"].status, Status::Done);
+        // dir should be preserved through the entire lifecycle
+        assert_eq!(app.sessions["s1"].dir.as_deref(), Some("/proj"));
+    }
+
+    // ── parser unit tests ───────────────────────────────────────────
 
     #[test]
     fn parse_status_valid() {
