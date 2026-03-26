@@ -10,13 +10,15 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 /// The ccmux hook entries to install, keyed by hook event name.
+/// Uses `$HOME/.cargo/bin/ccmux` so hooks work even when the hook
+/// runner's PATH doesn't include ~/.cargo/bin (the shell expands $HOME).
 fn ccmux_hooks() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("SessionStart", "ccmux emit --status starting"),
-        ("PreToolUse", "ccmux emit --status working"),
-        ("Notification", "ccmux emit --status waiting"),
-        ("Stop", "ccmux emit --status idle"),
-        ("SessionEnd", "ccmux emit --status done"),
+        ("SessionStart", "\"$HOME/.cargo/bin/ccmux\" emit --status starting"),
+        ("PreToolUse", "\"$HOME/.cargo/bin/ccmux\" emit --status working"),
+        ("Notification", "\"$HOME/.cargo/bin/ccmux\" emit --status waiting"),
+        ("Stop", "\"$HOME/.cargo/bin/ccmux\" emit --status idle"),
+        ("SessionEnd", "\"$HOME/.cargo/bin/ccmux\" emit --status done"),
     ]
 }
 
@@ -36,8 +38,8 @@ fn settings_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".claude").join("settings.json"))
 }
 
-/// Check if a ccmux hook command already exists in a hook event's matcher array.
-fn has_ccmux_hook(matchers: &[Value], command: &str) -> bool {
+/// Check if the exact command already exists in a hook event's matcher array.
+fn has_exact_hook(matchers: &[Value], command: &str) -> bool {
     matchers.iter().any(|matcher| {
         matcher
             .get("hooks")
@@ -76,7 +78,7 @@ fn merge_hooks(settings: &mut Value) -> bool {
             .as_array_mut();
 
         if let Some(matchers) = matchers
-            && !has_ccmux_hook(matchers, command)
+            && !has_exact_hook(matchers, command)
         {
             matchers.push(hook_matcher(command));
             changed = true;
@@ -213,7 +215,7 @@ mod tests {
         let inner = matcher["hooks"].as_array().unwrap();
         assert_eq!(inner.len(), 1);
         assert_eq!(inner[0]["type"], "command");
-        assert_eq!(inner[0]["command"], "ccmux emit --status starting");
+        assert!(inner[0]["command"].as_str().unwrap().ends_with("ccmux\" emit --status starting"));
     }
 
     #[test]
@@ -240,10 +242,8 @@ mod tests {
         // Original is preserved
         assert_eq!(pre_tool[0]["matcher"], "Bash");
         // ccmux hook appended
-        assert_eq!(
-            pre_tool[1]["hooks"][0]["command"],
-            "ccmux emit --status working"
-        );
+        let cmd = pre_tool[1]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.contains("ccmux") && cmd.contains("emit --status working"));
     }
 
     #[test]
@@ -272,10 +272,10 @@ mod tests {
     }
 
     #[test]
-    fn has_ccmux_hook_detection() {
+    fn has_exact_hook_detection() {
         let matchers = vec![hook_matcher("ccmux emit --status starting")];
-        assert!(has_ccmux_hook(&matchers, "ccmux emit --status starting"));
-        assert!(!has_ccmux_hook(&matchers, "ccmux emit --status working"));
+        assert!(has_exact_hook(&matchers, "ccmux emit --status starting"));
+        assert!(!has_exact_hook(&matchers, "ccmux emit --status working"));
     }
 
     #[test]
