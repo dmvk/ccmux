@@ -42,11 +42,13 @@ pub fn go_to_tab(name: &str) -> Result<()> {
 
 /// Close the Zellij tab with the given name.
 ///
-/// Navigates to the tab first, then closes it. Errors from go_to_tab are
-/// treated as non-fatal (the tab may already be gone).
+/// Navigates to the tab first. If the tab doesn't exist (go_to_tab fails),
+/// returns Ok(()) without closing anything — avoids killing the current tab.
 pub fn close_tab(name: &str) -> Result<()> {
-    // Navigate to the tab first — if it doesn't exist, ignore the error
-    let _ = go_to_tab(name);
+    // Navigate to the tab first — if it doesn't exist, bail early
+    if go_to_tab(name).is_err() {
+        return Ok(());
+    }
 
     let status = Command::new("zellij")
         .args(["action", "close-tab"])
