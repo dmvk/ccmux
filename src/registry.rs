@@ -76,6 +76,44 @@ pub fn write_session_atomic(name: &str, session: &Session) -> Result<()> {
     write_session_to(&registry_dir()?, name, session)
 }
 
+/// List all sessions in a given directory. Returns (name, Session) pairs.
+pub fn list_sessions_from(dir: &std::path::Path) -> Result<Vec<(String, Session)>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut sessions = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        // Skip temp files
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(String::from);
+        if let Some(name) = name {
+            let data = fs::read_to_string(&path);
+            if let Ok(data) = data
+                && let Ok(session) = serde_json::from_str::<Session>(&data)
+            {
+                sessions.push((name, session));
+            }
+        }
+    }
+    sessions.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(sessions)
+}
+
+/// List all sessions from the default registry directory.
+pub fn list_sessions() -> Result<Vec<(String, Session)>> {
+    list_sessions_from(&registry_dir()?)
+}
+
 /// Validate a session name per PRD §5:
 /// - Non-empty
 /// - Max 20 characters
@@ -188,6 +226,108 @@ mod tests {
         std::fs::write(dir.path().join("bad.json"), "not valid json").unwrap();
         let result = read_session_from(dir.path(), "bad");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_sessions_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = list_sessions_from(dir.path()).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn list_sessions_nonexistent_dir() {
+        let dir = std::path::Path::new("/tmp/ccmux-nonexistent-test-dir");
+        let sessions = list_sessions_from(dir).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn list_sessions_multiple() {
+        let dir = tempfile::tempdir().unwrap();
+        let s1 = Session {
+            status: Status::Working,
+            tool: Some("Bash".into()),
+            msg: None,
+            ts: 100,
+            seq: 1,
+            dir: Some("/project".into()),
+        };
+        let s2 = Session {
+            status: Status::Waiting,
+            tool: None,
+            msg: Some("confirm?".into()),
+            ts: 200,
+            seq: 3,
+            dir: Some("/other".into()),
+        };
+        write_session_to(dir.path(), "alpha", &s1).unwrap();
+        write_session_to(dir.path(), "beta", &s2).unwrap();
+
+        let sessions = list_sessions_from(dir.path()).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].0, "alpha");
+        assert_eq!(sessions[1].0, "beta");
+        assert_eq!(sessions[0].1.status, Status::Working);
+        assert_eq!(sessions[1].1.status, Status::Waiting);
+    }
+
+    #[test]
+    fn list_sessions_skips_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let s1 = Session {
+            status: Status::Idle,
+            tool: None,
+            msg: None,
+            ts: 0,
+            seq: 0,
+            dir: None,
+        };
+        write_session_to(dir.path(), "good", &s1).unwrap();
+        std::fs::write(dir.path().join("bad.json"), "not json").unwrap();
+
+        let sessions = list_sessions_from(dir.path()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].0, "good");
+    }
+
+    #[test]
+    fn list_sessions_skips_non_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let s1 = Session {
+            status: Status::Done,
+            tool: None,
+            msg: None,
+            ts: 0,
+            seq: 0,
+            dir: None,
+        };
+        write_session_to(dir.path(), "real", &s1).unwrap();
+        std::fs::write(dir.path().join("readme.txt"), "ignore me").unwrap();
+
+        let sessions = list_sessions_from(dir.path()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].0, "real");
+    }
+
+    #[test]
+    fn list_sessions_skips_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let s1 = Session {
+            status: Status::Working,
+            tool: None,
+            msg: None,
+            ts: 0,
+            seq: 0,
+            dir: None,
+        };
+        write_session_to(dir.path(), "sess", &s1).unwrap();
+        // Simulate a leftover temp file
+        std::fs::write(dir.path().join(".sess.json.tmp"), r#"{"status":"idle","tool":null,"msg":null,"ts":0,"seq":0,"dir":null}"#).unwrap();
+
+        let sessions = list_sessions_from(dir.path()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].0, "sess");
     }
 
     #[test]

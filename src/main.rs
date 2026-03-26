@@ -55,7 +55,33 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Attach { name: _ } => todo!("attach"),
         Commands::Kill { name: _ } => todo!("kill"),
-        Commands::List => todo!("list"),
+        Commands::List => {
+            let sessions = registry::list_sessions()?;
+            if sessions.is_empty() {
+                println!("No sessions.");
+                return Ok(());
+            }
+            // Header
+            println!(
+                "{:<20} {:<10} {:<12} {:<40} DIR",
+                "NAME", "STATUS", "TOOL", "MESSAGE"
+            );
+            println!("{}", "-".repeat(90));
+            for (name, s) in &sessions {
+                let status = match s.status {
+                    registry::Status::Starting => "starting",
+                    registry::Status::Working => "working",
+                    registry::Status::Waiting => "waiting",
+                    registry::Status::Idle => "idle",
+                    registry::Status::Done => "done",
+                };
+                let tool = s.tool.as_deref().unwrap_or("");
+                let msg = s.msg.as_deref().unwrap_or("");
+                let dir = s.dir.as_deref().unwrap_or("");
+                println!("{:<20} {:<10} {:<12} {:<40} {}", name, status, tool, msg, dir);
+            }
+            Ok(())
+        }
         Commands::Emit { ref status } => emit::run(status),
         Commands::Dashboard => todo!("dashboard"),
     }
