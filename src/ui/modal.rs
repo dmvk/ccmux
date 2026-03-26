@@ -101,7 +101,6 @@ fn truncate_to(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::dashboard::App;
-    use crate::registry::{Session, Status};
 
     fn buffer_text(buf: &Buffer) -> String {
         let area = buf.area;

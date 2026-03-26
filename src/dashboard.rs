@@ -430,7 +430,7 @@ impl App {
 
     /// Expand `~` to `$HOME` in a path string.
     fn expand_tilde(path: &str) -> String {
-        if path.starts_with('~')
+        if (path == "~" || path.starts_with("~/"))
             && let Ok(home) = std::env::var("HOME")
         {
             return path.replacen('~', &home, 1);
