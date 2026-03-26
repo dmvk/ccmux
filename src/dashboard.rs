@@ -224,23 +224,23 @@ impl App {
             self.clamp_selections();
 
             // Auto-focus a session created from the dashboard modal
-            if let Some(ref focus_name) = self.pending_focus {
-                if self.sessions.contains_key(focus_name) {
-                    let focus_name = focus_name.clone();
-                    self.pending_focus = None;
-                    // Find which column it's in and focus it
-                    let col = self
-                        .sessions
-                        .get(&focus_name)
-                        .map(|s| self.effective_column(&focus_name, s))
-                        .unwrap_or(Column::Working);
-                    let visible = self.visible_columns();
-                    if let Some(col_idx) = visible.iter().position(|c| *c == col) {
-                        self.selected_column = col_idx;
-                        let entries = self.sessions_in_column(col);
-                        if let Some(row) = entries.iter().position(|(n, _)| *n == focus_name) {
-                            self.selected_rows.insert(col, row);
-                        }
+            if let Some(ref focus_name) = self.pending_focus
+                && self.sessions.contains_key(focus_name)
+            {
+                let focus_name = focus_name.clone();
+                self.pending_focus = None;
+                // Find which column it's in and focus it
+                let col = self
+                    .sessions
+                    .get(&focus_name)
+                    .map(|s| self.effective_column(&focus_name, s))
+                    .unwrap_or(Column::Working);
+                let visible = self.visible_columns();
+                if let Some(col_idx) = visible.iter().position(|c| *c == col) {
+                    self.selected_column = col_idx;
+                    let entries = self.sessions_in_column(col);
+                    if let Some(row) = entries.iter().position(|(n, _)| *n == focus_name) {
+                        self.selected_rows.insert(col, row);
                     }
                 }
             }
@@ -430,10 +430,10 @@ impl App {
 
     /// Expand `~` to `$HOME` in a path string.
     fn expand_tilde(path: &str) -> String {
-        if path.starts_with('~') {
-            if let Ok(home) = std::env::var("HOME") {
-                return path.replacen('~', &home, 1);
-            }
+        if path.starts_with('~')
+            && let Ok(home) = std::env::var("HOME")
+        {
+            return path.replacen('~', &home, 1);
         }
         path.to_string()
     }

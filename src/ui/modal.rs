@@ -80,11 +80,11 @@ pub fn render_modal(app: &App, area: Rect, buf: &mut Buffer) {
     }
 
     // Line 3: Error message
-    if area.height >= 4 {
-        if let Some(ref err) = app.modal_error {
-            let display = truncate_to(err, avail);
-            buf.set_string(x, area.y + 3, &display, error_style);
-        }
+    if area.height >= 4
+        && let Some(ref err) = app.modal_error
+    {
+        let display = truncate_to(err, avail);
+        buf.set_string(x, area.y + 3, &display, error_style);
     }
 }
 
