@@ -182,7 +182,8 @@ mod tests {
         let session = make_session(Status::Idle, 100);
         write_session_to(dir.path(), "docs", &session).unwrap();
 
-        let app = App::with_registry_dir(dir.path()).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.selected_column = 2; // Idle column
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
         render_statusbar(&app, area, &mut buf);
@@ -221,7 +222,8 @@ mod tests {
         session.tool = Some("Edit".to_string());
         write_session_to(dir.path(), "ml-feats", &session).unwrap();
 
-        let app = App::with_registry_dir(dir.path()).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.selected_column = 1; // Working column
         let area = Rect::new(0, 0, 80, 2);
         let mut buf = Buffer::empty(area);
         render_statusbar(&app, area, &mut buf);
@@ -238,7 +240,8 @@ mod tests {
         session.dir = None;
         write_session_to(dir.path(), "nodirtest", &session).unwrap();
 
-        let app = App::with_registry_dir(dir.path()).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.selected_column = 2; // Idle column
         let area = Rect::new(0, 0, 80, 2);
         let mut buf = Buffer::empty(area);
         render_statusbar(&app, area, &mut buf);

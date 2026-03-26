@@ -264,7 +264,7 @@ mod tests {
         write_session_to(dir.path(), "trading", &session).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        let area = Rect::new(0, 0, 40, 10);
+        let area = Rect::new(0, 0, 120, 10);
         let mut buf = Buffer::empty(area);
         render_kanban(&app, area, &mut buf, 1000);
 
@@ -319,7 +319,7 @@ mod tests {
         write_session_to(dir.path(), "selected", &session).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        let area = Rect::new(0, 0, 40, 10);
+        let area = Rect::new(0, 0, 120, 10);
         let mut buf = Buffer::empty(area);
         render_kanban(&app, area, &mut buf, 1000);
 

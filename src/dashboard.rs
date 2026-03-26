@@ -158,17 +158,9 @@ impl App {
         Column::from_status(&session.status)
     }
 
-    /// Returns columns that have at least one session, in display order.
+    /// Returns all columns in display order.
     pub fn visible_columns(&self) -> Vec<Column> {
-        COLUMN_ORDER
-            .iter()
-            .copied()
-            .filter(|col| {
-                self.sessions
-                    .iter()
-                    .any(|(name, s)| self.effective_column(name, s) == *col)
-            })
-            .collect()
+        COLUMN_ORDER.to_vec()
     }
 
     /// Returns (name, session) pairs for a column, sorted by age ascending (oldest first).
@@ -687,11 +679,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_app_has_no_visible_columns() {
+    fn empty_app_shows_all_columns() {
         let dir = tempfile::tempdir().unwrap();
         let app = App::with_registry_dir(dir.path()).unwrap();
-        assert!(app.visible_columns().is_empty());
-        assert!(app.current_column().is_none());
+        assert_eq!(app.visible_columns().len(), 4);
+        assert_eq!(app.current_column(), Some(Column::Waiting));
         assert!(app.selected_session().is_none());
     }
 
@@ -712,13 +704,16 @@ mod tests {
     }
 
     #[test]
-    fn visible_columns_hides_empty() {
+    fn visible_columns_always_shows_all() {
         let dir = tempfile::tempdir().unwrap();
         write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Done, 200)).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.visible_columns(), vec![Column::Waiting, Column::Done]);
+        assert_eq!(
+            app.visible_columns(),
+            vec![Column::Waiting, Column::Working, Column::Idle, Column::Done]
+        );
     }
 
     #[test]
@@ -732,12 +727,13 @@ mod tests {
     }
 
     #[test]
-    fn initial_focus_falls_back_to_first_visible() {
+    fn initial_focus_falls_back_to_first_column() {
         let dir = tempfile::tempdir().unwrap();
         write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.current_column(), Some(Column::Working));
+        // No Waiting sessions, so falls back to first column (Waiting)
+        assert_eq!(app.current_column(), Some(Column::Waiting));
     }
 
     #[test]
@@ -813,6 +809,7 @@ mod tests {
         write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.selected_column = 1; // Working column
         assert_eq!(app.selected_rows.get(&Column::Working).copied().unwrap_or(0), 0);
         app.move_down();
         assert_eq!(app.selected_rows.get(&Column::Working).copied(), Some(1));
@@ -835,6 +832,7 @@ mod tests {
         write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.selected_column = 1; // Working column
         app.selected_rows.insert(Column::Working, 1);
         app.move_up();
         assert_eq!(app.selected_rows.get(&Column::Working).copied(), Some(0));
@@ -870,9 +868,9 @@ mod tests {
         write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
-        app.move_right();
-        app.move_right(); // already at last column
-        assert_eq!(app.current_column(), Some(Column::Working));
+        app.selected_column = 3; // Done (last column)
+        app.move_right(); // should stay at last column
+        assert_eq!(app.current_column(), Some(Column::Done));
     }
 
     #[test]
@@ -899,29 +897,36 @@ mod tests {
     }
 
     #[test]
-    fn navigation_skips_empty_columns() {
+    fn navigation_traverses_all_columns() {
         let dir = tempfile::tempdir().unwrap();
-        // Only Waiting and Done exist — Working and Idle are empty/hidden
         write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Done, 200)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
         assert_eq!(app.current_column(), Some(Column::Waiting));
         app.move_right();
-        // Should jump straight to Done, skipping empty Working and Idle
+        // All columns are always visible, so next is Working
+        assert_eq!(app.current_column(), Some(Column::Working));
+        app.move_right();
+        assert_eq!(app.current_column(), Some(Column::Idle));
+        app.move_right();
         assert_eq!(app.current_column(), Some(Column::Done));
     }
 
     #[test]
-    fn navigation_noop_on_empty_app() {
+    fn navigation_on_empty_app_stays_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_registry_dir(dir.path()).unwrap();
-        // All should be no-ops
+        // All columns visible even with no sessions
+        assert_eq!(app.current_column(), Some(Column::Waiting));
         app.move_up();
         app.move_down();
         app.move_left();
+        // Still at first column
+        assert_eq!(app.current_column(), Some(Column::Waiting));
+        // Can navigate right through all columns
         app.move_right();
-        assert!(app.current_column().is_none());
+        assert_eq!(app.current_column(), Some(Column::Working));
     }
 
     #[test]
