@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("session '{name}' already exists");
             }
             let env_var = format!("CCMUX_SESSION={name}");
-            zellij::new_tab(name, "env", &[&env_var, "claude"])?;
+            zellij::new_tab(name, "env", &[&env_var, "claude", "--dangerously-skip-permissions"], None)?;
             Ok(())
         }
         Commands::Attach { ref name } => zellij::go_to_tab(name),

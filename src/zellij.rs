@@ -10,11 +10,14 @@ use std::process::Command;
 
 /// Create a new Zellij tab with the given name, running a command inside it.
 ///
-/// Equivalent to: `zellij action new-tab --name <name> -- <command> <args...>`
-pub fn new_tab(name: &str, command: &str, args: &[&str]) -> Result<()> {
+/// Equivalent to: `zellij action new-tab --name <name> [--cwd <dir>] -- <command> <args...>`
+pub fn new_tab(name: &str, command: &str, args: &[&str], cwd: Option<&str>) -> Result<()> {
     let mut cmd = Command::new("zellij");
-    cmd.args(["action", "new-tab", "--name", name, "--"]);
-    cmd.arg(command);
+    cmd.args(["action", "new-tab", "--name", name]);
+    if let Some(dir) = cwd {
+        cmd.args(["--cwd", dir]);
+    }
+    cmd.args(["--", command]);
     cmd.args(args);
 
     let status = cmd
