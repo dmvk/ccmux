@@ -24,6 +24,13 @@ pub enum Column {
     Done,
 }
 
+/// Dashboard input mode — Normal for kanban navigation, NewSession for the modal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputMode {
+    Normal,
+    NewSession,
+}
+
 /// Column display order (left to right).
 pub const COLUMN_ORDER: [Column; 4] =
     [Column::Waiting, Column::Working, Column::Idle, Column::Done];
@@ -73,6 +80,20 @@ pub struct App {
     pub should_quit: bool,
     /// Debounce timers: session name -> time the waiting event arrived.
     pub debounce_timers: HashMap<String, Instant>,
+    /// Current input mode (normal navigation vs. modal input).
+    pub input_mode: InputMode,
+    /// Text buffer for the session name field in the new-session modal.
+    pub modal_name: String,
+    /// Text buffer for the directory field in the new-session modal.
+    pub modal_dir: String,
+    /// Which field is active in the modal: 0 = name, 1 = directory.
+    pub modal_field: usize,
+    /// Validation error message to display in the modal, if any.
+    pub modal_error: Option<String>,
+    /// Default working directory for new sessions (cwd of the dashboard process).
+    pub default_cwd: String,
+    /// Session name to auto-focus on next watcher reload (set when creating from modal).
+    pub pending_focus: Option<String>,
 }
 
 impl App {
@@ -108,6 +129,16 @@ impl App {
             registry_dir: dir.to_path_buf(),
             should_quit: false,
             debounce_timers: HashMap::new(),
+            input_mode: InputMode::Normal,
+            modal_name: String::new(),
+            modal_dir: String::new(),
+            modal_field: 0,
+            modal_error: None,
+            default_cwd: std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            pending_focus: None,
         };
 
         app.focus_initial_column();
@@ -321,6 +352,94 @@ impl App {
                 self.selected_rows.insert(Column::Waiting, row);
             }
         }
+    }
+
+    /// Open the new-session modal, pre-filling the directory with the given default.
+    pub fn open_new_session_modal(&mut self, default_dir: &str) {
+        self.input_mode = InputMode::NewSession;
+        self.modal_name.clear();
+        self.modal_dir = default_dir.to_string();
+        self.modal_field = 0;
+        self.modal_error = None;
+    }
+
+    /// Close the new-session modal and return to normal mode.
+    pub fn close_modal(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.modal_name.clear();
+        self.modal_dir.clear();
+        self.modal_field = 0;
+        self.modal_error = None;
+    }
+
+    /// Returns the currently active modal text buffer (name or dir).
+    pub fn active_modal_buffer(&self) -> &str {
+        if self.modal_field == 0 {
+            &self.modal_name
+        } else {
+            &self.modal_dir
+        }
+    }
+
+    /// Push a character to the active modal field.
+    pub fn modal_push_char(&mut self, c: char) {
+        self.modal_error = None;
+        if self.modal_field == 0 {
+            self.modal_name.push(c);
+        } else {
+            self.modal_dir.push(c);
+        }
+    }
+
+    /// Delete the last character from the active modal field.
+    pub fn modal_pop_char(&mut self) {
+        self.modal_error = None;
+        if self.modal_field == 0 {
+            self.modal_name.pop();
+        } else {
+            self.modal_dir.pop();
+        }
+    }
+
+    /// Toggle between name (0) and directory (1) fields.
+    pub fn modal_toggle_field(&mut self) {
+        self.modal_field = if self.modal_field == 0 { 1 } else { 0 };
+    }
+
+    /// Expand `~` to `$HOME` in a path string.
+    fn expand_tilde(path: &str) -> String {
+        if path.starts_with('~') {
+            if let Ok(home) = std::env::var("HOME") {
+                return path.replacen('~', &home, 1);
+            }
+        }
+        path.to_string()
+    }
+
+    /// Validate modal inputs. Returns Ok((name, dir)) or sets modal_error and returns Err.
+    pub fn validate_modal(&mut self) -> std::result::Result<(String, String), ()> {
+        let name = self.modal_name.trim().to_string();
+        let dir = Self::expand_tilde(self.modal_dir.trim());
+
+        // Validate name
+        if let Err(e) = registry::validate_session_name(&name) {
+            self.modal_error = Some(e.to_string());
+            return Err(());
+        }
+
+        // Check for duplicate
+        if self.sessions.contains_key(&name) {
+            self.modal_error = Some(format!("session '{name}' already exists"));
+            return Err(());
+        }
+
+        // Validate directory exists
+        if !std::path::Path::new(&dir).is_dir() {
+            self.modal_error = Some("directory does not exist".to_string());
+            return Err(());
+        }
+
+        Ok((name, dir))
     }
 }
 
@@ -1049,5 +1168,119 @@ mod tests {
     #[test]
     fn age_style_is_dark_gray() {
         assert_eq!(age_style().fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn open_modal_sets_mode_and_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.open_new_session_modal("/home/user/project");
+        assert_eq!(app.input_mode, InputMode::NewSession);
+        assert_eq!(app.modal_name, "");
+        assert_eq!(app.modal_dir, "/home/user/project");
+        assert_eq!(app.modal_field, 0);
+        assert!(app.modal_error.is_none());
+    }
+
+    #[test]
+    fn close_modal_resets_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.open_new_session_modal("/tmp");
+        app.modal_name = "test".to_string();
+        app.close_modal();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.modal_name, "");
+        assert_eq!(app.modal_dir, "");
+    }
+
+    #[test]
+    fn modal_push_pop_char() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.open_new_session_modal("/tmp");
+
+        // Field 0 = name
+        app.modal_push_char('a');
+        app.modal_push_char('b');
+        assert_eq!(app.modal_name, "ab");
+        app.modal_pop_char();
+        assert_eq!(app.modal_name, "a");
+
+        // Switch to field 1 = dir
+        app.modal_toggle_field();
+        assert_eq!(app.modal_field, 1);
+        app.modal_push_char('x');
+        assert_eq!(app.modal_dir, "/tmpx");
+        app.modal_pop_char();
+        assert_eq!(app.modal_dir, "/tmp");
+    }
+
+    #[test]
+    fn modal_toggle_field_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.open_new_session_modal("/tmp");
+        assert_eq!(app.modal_field, 0);
+        app.modal_toggle_field();
+        assert_eq!(app.modal_field, 1);
+        app.modal_toggle_field();
+        assert_eq!(app.modal_field, 0);
+    }
+
+    #[test]
+    fn validate_modal_rejects_empty_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.open_new_session_modal(dir.path().to_str().unwrap());
+        // Name is empty
+        assert!(app.validate_modal().is_err());
+        assert!(app.modal_error.as_ref().unwrap().contains("empty"));
+    }
+
+    #[test]
+    fn validate_modal_rejects_duplicate_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "taken", &make_session(Status::Working, 100)).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.open_new_session_modal(dir.path().to_str().unwrap());
+        app.modal_name = "taken".to_string();
+        assert!(app.validate_modal().is_err());
+        assert!(app.modal_error.as_ref().unwrap().contains("already exists"));
+    }
+
+    #[test]
+    fn validate_modal_rejects_bad_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.open_new_session_modal("/nonexistent/path/12345");
+        app.modal_name = "good-name".to_string();
+        assert!(app.validate_modal().is_err());
+        assert!(app.modal_error.as_ref().unwrap().contains("does not exist"));
+    }
+
+    #[test]
+    fn validate_modal_accepts_valid_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.open_new_session_modal(dir.path().to_str().unwrap());
+        app.modal_name = "new-sess".to_string();
+        let result = app.validate_modal();
+        assert!(result.is_ok());
+        let (name, resolved_dir) = result.unwrap();
+        assert_eq!(name, "new-sess");
+        assert_eq!(resolved_dir, dir.path().to_str().unwrap());
+    }
+
+    #[test]
+    fn expand_tilde_replaces_home() {
+        let expanded = App::expand_tilde("~/projects/foo");
+        assert!(!expanded.starts_with('~'));
+        assert!(expanded.ends_with("/projects/foo"));
+    }
+
+    #[test]
+    fn expand_tilde_leaves_absolute_path() {
+        assert_eq!(App::expand_tilde("/usr/local"), "/usr/local");
     }
 }
