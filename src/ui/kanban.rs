@@ -160,15 +160,16 @@ fn render_column(
             y += 1;
         }
 
-        // Line 3: directory
+        // Line 3: directory (shorten $HOME → ~)
         if y < area.y + area.height {
             let indent = 2u16;
             let avail = (cw as usize).saturating_sub(indent as usize);
             if let Some(ref dir) = session.dir {
+                let display_dir = shorten_home(dir);
                 buf.set_string(
                     cx + indent,
                     y,
-                    truncate_str(dir, avail),
+                    truncate_str(&display_dir, avail),
                     dir_style(),
                 );
             }
@@ -201,6 +202,22 @@ fn header_style(col: &Column) -> Style {
         Column::Idle => Style::default().fg(Color::DarkGray),
         Column::Done => Style::default().fg(Color::Green),
     }
+}
+
+/// Replace the `$HOME` prefix in a path with `~`.
+fn shorten_home(path: &str) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy();
+        if path == home.as_ref() {
+            return "~".to_string();
+        }
+        if let Some(rest) = path.strip_prefix(home.as_ref()) {
+            if rest.starts_with('/') {
+                return format!("~{rest}");
+            }
+        }
+    }
+    path.to_string()
 }
 
 /// Truncate a string to fit within `max` display cells, appending ".." if needed.
