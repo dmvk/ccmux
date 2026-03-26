@@ -318,6 +318,19 @@ impl App {
     }
 }
 
+/// Format a session's age relative to `now` as a compact string.
+/// Returns seconds (e.g. "43s"), minutes ("14m"), or hours ("2h").
+pub fn format_age(ts: u64, now: u64) -> String {
+    let elapsed = now.saturating_sub(ts);
+    if elapsed < 60 {
+        format!("{}s", elapsed)
+    } else if elapsed < 3600 {
+        format!("{}m", elapsed / 60)
+    } else {
+        format!("{}h", elapsed / 3600)
+    }
+}
+
 /// Load all sessions from a directory into a HashMap.
 fn load_sessions_from(dir: &Path) -> HashMap<String, Session> {
     registry::list_sessions_from(dir)
@@ -786,5 +799,34 @@ mod tests {
         assert!(!app.debounce_timers.contains_key("sess"));
         // Shows in Waiting column directly
         assert_eq!(app.sessions_in_column(Column::Waiting).len(), 1);
+    }
+
+    // --- Age formatting tests ---
+
+    #[test]
+    fn format_age_seconds() {
+        assert_eq!(format_age(1000, 1043), "43s");
+        assert_eq!(format_age(1000, 1000), "0s");
+        assert_eq!(format_age(1000, 1059), "59s");
+    }
+
+    #[test]
+    fn format_age_minutes() {
+        assert_eq!(format_age(1000, 1060), "1m");
+        assert_eq!(format_age(1000, 1840), "14m");
+        assert_eq!(format_age(1000, 4599), "59m");
+    }
+
+    #[test]
+    fn format_age_hours() {
+        assert_eq!(format_age(1000, 4600), "1h");
+        assert_eq!(format_age(1000, 8200), "2h");
+        assert_eq!(format_age(0, 360000), "100h");
+    }
+
+    #[test]
+    fn format_age_future_timestamp_saturates() {
+        // If ts is in the future (clock skew), saturating_sub gives 0
+        assert_eq!(format_age(2000, 1000), "0s");
     }
 }
