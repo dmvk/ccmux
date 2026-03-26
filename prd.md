@@ -431,3 +431,83 @@ No Docker needed — pure Rust binary, no runtime deps.
 - Multiplexer abstraction (tmux support)
 - Adaptive layout for narrow terminals
 - Config file (`~/.config/ccmux/config.toml`)
+
+---
+
+## 13. Verification Criteria
+
+Each criterion below must pass for the MVP to be considered complete. Ralph should check these after implementation.
+
+### Build
+
+- [ ] `cargo build --release` succeeds with zero errors
+- [ ] `cargo clippy -- -D warnings` passes clean
+- [ ] `cargo test` passes all tests
+
+### CLI subcommands
+
+- [ ] `ccmux --help` lists all subcommands: `init`, `new`, `attach`, `kill`, `list`, `emit`, `dashboard`
+- [ ] `ccmux emit --help` shows `--status` flag
+- [ ] `ccmux new --help` shows `<name>` argument
+- [ ] Invalid subcommand prints error and usage
+
+### Session name validation
+
+- [ ] `ccmux new valid-name` accepts alphanumeric + hyphen
+- [ ] `ccmux new "bad name!"` rejects names with invalid characters (exit code non-zero, error message)
+- [ ] `ccmux new aaaaaaaaaaaaaaaaaaaaa` rejects names longer than 20 chars
+- [ ] `ccmux new ""` rejects empty name
+
+### `ccmux emit` (unit-testable, no Zellij needed)
+
+- [ ] With `CCMUX_SESSION=test` and `--status working`, writes `~/.ccmux/test.json`
+- [ ] Output JSON contains all required fields: `status`, `tool`, `msg`, `ts`, `seq`, `dir`
+- [ ] `seq` increments on each call for the same session
+- [ ] `--status starting` sets the `dir` field; subsequent calls preserve it
+- [ ] Writes are atomic — a temp file is created and renamed (no partial writes)
+- [ ] With `CCMUX_SESSION` unset, exits silently with success (no crash, no file written)
+- [ ] Parses stdin JSON payload to extract tool name (for `working`) and message (for `waiting`)
+
+### Session registry (unit-testable)
+
+- [ ] `Session` struct round-trips through serde: serialize → deserialize produces identical struct
+- [ ] Reading a malformed JSON file returns an error, does not panic
+- [ ] Reading a nonexistent file returns an error, does not panic
+- [ ] File watcher (notify crate) detects new/modified/deleted files in the registry directory
+
+### Dashboard TUI (testable with `ratatui::TestBackend`)
+
+- [ ] Renders without panic on an 80×24 `TestBackend`
+- [ ] Sessions sort into correct columns by status
+- [ ] Empty columns are hidden (not rendered)
+- [ ] `j`/`k` moves selection within a column
+- [ ] `h`/`l` moves selection between visible columns, skipping hidden ones
+- [ ] Debounce: a `waiting` event followed by a `working` event within 5s never shows `waiting`
+- [ ] Debounce: a `waiting` event with no follow-up within 5s does transition to `waiting`
+- [ ] Auto-focus: when a session becomes `waiting`, selection jumps to it
+- [ ] Age display updates each tick (shows seconds/minutes/hours)
+- [ ] Status icons match spec: `?` waiting, `●` working, `○` idle, `✓` done
+
+### Zellij integration (compile-time verification only)
+
+- [ ] `zellij.rs` module exists and compiles
+- [ ] Functions for `new_tab`, `go_to_tab`, `close_tab` are defined
+- [ ] All Zellij interaction is isolated in `zellij.rs` (no `zellij` string literals in other modules except imports)
+
+### `ccmux init`
+
+- [ ] Generates correct hook JSON matching the spec in section 6
+- [ ] Does not overwrite existing hooks — merges with existing config
+- [ ] Prints diff of changes before writing (user confirmation in interactive mode)
+
+### Integration smoke test
+
+- [ ] Full round-trip without Zellij: `CCMUX_SESSION=test ccmux emit --status starting` piped valid JSON → verify `~/.ccmux/test.json` exists with correct content
+- [ ] `ccmux list` shows the session created above
+- [ ] `ccmux kill test` removes the registry file (Zellij tab close can fail gracefully if not in Zellij)
+
+### Code structure
+
+- [ ] Crate structure matches section 10: `main.rs`, `registry.rs`, `emit.rs`, `dashboard.rs`, `ui/kanban.rs`, `ui/statusbar.rs`, `zellij.rs`
+- [ ] No `async` runtime — single-threaded poll loop with `crossterm::event::poll`
+- [ ] No `unwrap()` on user-facing paths — all errors use `anyhow::Result` or explicit error handling
