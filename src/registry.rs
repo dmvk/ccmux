@@ -18,6 +18,7 @@ pub enum Status {
 pub struct Session {
     pub status: Status,
     pub tool: Option<String>,
+    pub desc: Option<String>,
     pub msg: Option<String>,
     pub ts: u64,
     pub seq: u64,
@@ -197,6 +198,7 @@ mod tests {
         let session = Session {
             status: Status::Working,
             tool: Some("Edit".into()),
+            desc: None,
             msg: None,
             ts: 1711234567,
             seq: 42,
@@ -215,6 +217,7 @@ mod tests {
         let session = Session {
             status: Status::Working,
             tool: Some("Bash".into()),
+            desc: None,
             msg: None,
             ts: 1711234567,
             seq: 5,
@@ -263,6 +266,7 @@ mod tests {
         let s1 = Session {
             status: Status::Working,
             tool: Some("Bash".into()),
+            desc: None,
             msg: None,
             ts: 100,
             seq: 1,
@@ -271,6 +275,7 @@ mod tests {
         let s2 = Session {
             status: Status::Waiting,
             tool: None,
+            desc: None,
             msg: Some("confirm?".into()),
             ts: 200,
             seq: 3,
@@ -293,6 +298,7 @@ mod tests {
         let s1 = Session {
             status: Status::Idle,
             tool: None,
+            desc: None,
             msg: None,
             ts: 0,
             seq: 0,
@@ -312,6 +318,7 @@ mod tests {
         let s1 = Session {
             status: Status::Done,
             tool: None,
+            desc: None,
             msg: None,
             ts: 0,
             seq: 0,
@@ -331,6 +338,7 @@ mod tests {
         let s1 = Session {
             status: Status::Working,
             tool: None,
+            desc: None,
             msg: None,
             ts: 0,
             seq: 0,
@@ -351,6 +359,7 @@ mod tests {
         let session = Session {
             status: Status::Idle,
             tool: None,
+            desc: None,
             msg: None,
             ts: 0,
             seq: 0,
@@ -369,6 +378,7 @@ mod tests {
         let session = Session {
             status: Status::Working,
             tool: None,
+            desc: None,
             msg: None,
             ts: 0,
             seq: 0,
@@ -386,5 +396,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Should not error when file doesn't exist
         remove_session_from(dir.path(), "ghost").unwrap();
+    }
+
+    #[test]
+    fn session_with_desc_roundtrip() {
+        let session = Session {
+            status: Status::Working,
+            tool: Some("Bash".into()),
+            desc: Some("Install dependencies".into()),
+            msg: None,
+            ts: 100,
+            seq: 1,
+            dir: Some("/project".into()),
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.desc.as_deref(), Some("Install dependencies"));
+    }
+
+    #[test]
+    fn session_without_desc_deserializes() {
+        let json = r#"{"status":"working","tool":"Bash","msg":null,"ts":100,"seq":1,"dir":"/project"}"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.desc, None);
+        assert_eq!(session.tool.as_deref(), Some("Bash"));
     }
 }

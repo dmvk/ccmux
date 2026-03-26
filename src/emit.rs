@@ -24,6 +24,7 @@ fn parse_status(s: &str) -> Result<Status> {
 /// Extract fields from the Claude Code hook stdin JSON payload.
 struct HookPayload {
     tool_name: Option<String>,
+    tool_desc: Option<String>,
     message: Option<String>,
     cwd: Option<String>,
 }
@@ -46,8 +47,24 @@ fn parse_stdin_payload(stdin_data: &str) -> HookPayload {
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    let tool_desc = val
+        .get("tool_input")
+        .and_then(|ti| {
+            let fields = [
+                "description", "file_path", "pattern", "query", "url",
+                "command", "title", "message",
+            ];
+            fields.iter().find_map(|f| {
+                ti.get(f)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            })
+        })
+        .map(|s| truncate(s, 80).to_string());
+
     HookPayload {
         tool_name,
+        tool_desc,
         message,
         cwd,
     }
@@ -111,9 +128,15 @@ pub fn emit_to(
         existing.as_ref().and_then(|s| s.dir.clone())
     };
 
-    // tool: only populated when working
+    // tool + desc: only populated when working
     let tool = if status == Status::Working {
         payload.tool_name
+    } else {
+        None
+    };
+
+    let desc = if status == Status::Working {
+        payload.tool_desc
     } else {
         None
     };
@@ -128,6 +151,7 @@ pub fn emit_to(
     let session = Session {
         status,
         tool,
+        desc,
         msg,
         ts,
         seq,
@@ -347,5 +371,85 @@ mod tests {
         let t = truncate(s, 4);
         assert!(t.len() <= 4);
         assert_eq!(t, "caf"); // cuts before the multi-byte char
+    }
+
+    // ── tool_input cascade tests ────────────────────────────────────
+
+    #[test]
+    fn parse_payload_extracts_desc_from_description() {
+        let json = r#"{"tool_name":"Bash","tool_input":{"command":"npm install","description":"Install dependencies"}}"#;
+        let p = parse_stdin_payload(json);
+        assert_eq!(p.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(p.tool_desc.as_deref(), Some("Install dependencies"));
+    }
+
+    #[test]
+    fn parse_payload_cascade_file_path() {
+        let json = r#"{"tool_name":"Read","tool_input":{"file_path":"/src/main.rs"}}"#;
+        let p = parse_stdin_payload(json);
+        assert_eq!(p.tool_desc.as_deref(), Some("/src/main.rs"));
+    }
+
+    #[test]
+    fn parse_payload_cascade_pattern() {
+        let json = r#"{"tool_name":"Grep","tool_input":{"pattern":"TODO","path":"src/"}}"#;
+        let p = parse_stdin_payload(json);
+        assert_eq!(p.tool_desc.as_deref(), Some("TODO"));
+    }
+
+    #[test]
+    fn parse_payload_cascade_query() {
+        let json = r#"{"tool_name":"WebSearch","tool_input":{"query":"rust serde"}}"#;
+        let p = parse_stdin_payload(json);
+        assert_eq!(p.tool_desc.as_deref(), Some("rust serde"));
+    }
+
+    #[test]
+    fn parse_payload_cascade_skips_empty() {
+        let json = r#"{"tool_name":"Bash","tool_input":{"description":"","command":"ls -la"}}"#;
+        let p = parse_stdin_payload(json);
+        assert_eq!(p.tool_desc.as_deref(), Some("ls -la"));
+    }
+
+    #[test]
+    fn parse_payload_no_tool_input() {
+        let json = r#"{"tool_name":"Bash"}"#;
+        let p = parse_stdin_payload(json);
+        assert_eq!(p.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(p.tool_desc, None);
+    }
+
+    #[test]
+    fn parse_payload_desc_truncated_at_80() {
+        let long_cmd = "a".repeat(120);
+        let json = format!(r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#, long_cmd);
+        let p = parse_stdin_payload(&json);
+        assert_eq!(p.tool_desc.as_ref().unwrap().len(), 80);
+    }
+
+    #[test]
+    fn emit_to_stores_desc_from_tool_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"tool_name":"Bash","tool_input":{"description":"Install deps","command":"npm i"}}"#;
+        emit_to(dir.path(), "s1", "working", json).unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.tool.as_deref(), Some("Bash"));
+        assert_eq!(session.desc.as_deref(), Some("Install deps"));
+    }
+
+    #[test]
+    fn emit_to_clears_desc_on_non_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"tool_name":"Bash","tool_input":{"description":"Install deps"}}"#;
+        emit_to(dir.path(), "s1", "working", json).unwrap();
+        emit_to(dir.path(), "s1", "waiting", r#"{"message":"Continue?"}"#).unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.desc, None);
     }
 }
