@@ -56,12 +56,16 @@ fn merge_hooks(settings: &mut Value) -> bool {
     if !settings.is_object() {
         *settings = json!({});
     }
-    let obj = settings.as_object_mut().unwrap();
+    let Some(obj) = settings.as_object_mut() else {
+        return false;
+    };
 
     if !obj.contains_key("hooks") || !obj["hooks"].is_object() {
         obj.insert("hooks".into(), json!({}));
     }
-    let hooks_obj = obj.get_mut("hooks").unwrap().as_object_mut().unwrap();
+    let Some(hooks_obj) = obj.get_mut("hooks").and_then(|v| v.as_object_mut()) else {
+        return false;
+    };
 
     let mut changed = false;
 
