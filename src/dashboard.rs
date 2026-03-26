@@ -4,6 +4,7 @@
 use crate::registry::{self, Session, Status};
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use ratatui::style::{Color, Style};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -340,6 +341,44 @@ pub fn format_age(ts: u64, now: u64) -> String {
     } else {
         format!("{}h", elapsed / 3600)
     }
+}
+
+/// Return the style for a status icon per PRD §8 colour scheme.
+pub fn status_style(status: &Status) -> Style {
+    match status {
+        Status::Waiting => Style::default().fg(Color::Yellow),
+        Status::Starting | Status::Working => Style::default().fg(Color::Blue),
+        Status::Idle => Style::default().fg(Color::DarkGray),
+        Status::Done => Style::default().fg(Color::Green),
+    }
+}
+
+/// Style for the selected row: dark blue background.
+pub fn selected_style() -> Style {
+    Style::default().bg(Color::Blue)
+}
+
+/// Style for tool name display.
+pub fn tool_style() -> Style {
+    Style::default().fg(Color::Cyan)
+}
+
+/// Style for directory display.
+pub fn dir_style() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+/// Style for a session's message text, varying by status.
+pub fn msg_style(status: &Status) -> Style {
+    match status {
+        Status::Waiting => Style::default().fg(Color::Yellow),
+        _ => Style::default().fg(Color::Gray),
+    }
+}
+
+/// Style for the age display.
+pub fn age_style() -> Style {
+    Style::default().fg(Color::DarkGray)
 }
 
 /// Load all sessions from a directory into a HashMap.
@@ -866,5 +905,62 @@ mod tests {
     #[test]
     fn status_icon_done() {
         assert_eq!(status_icon(&Status::Done), "✓");
+    }
+
+    // --- Colour scheme tests ---
+
+    #[test]
+    fn status_style_waiting_is_yellow() {
+        assert_eq!(status_style(&Status::Waiting).fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn status_style_working_is_blue() {
+        assert_eq!(status_style(&Status::Working).fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn status_style_starting_groups_with_working() {
+        assert_eq!(status_style(&Status::Starting).fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn status_style_idle_is_dark_gray() {
+        assert_eq!(status_style(&Status::Idle).fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn status_style_done_is_green() {
+        assert_eq!(status_style(&Status::Done).fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn selected_style_has_dark_blue_bg() {
+        assert_eq!(selected_style().bg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn tool_style_is_cyan() {
+        assert_eq!(tool_style().fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn dir_style_is_dark_gray() {
+        assert_eq!(dir_style().fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn msg_style_waiting_is_yellow() {
+        assert_eq!(msg_style(&Status::Waiting).fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn msg_style_working_is_gray() {
+        assert_eq!(msg_style(&Status::Working).fg, Some(Color::Gray));
+    }
+
+    #[test]
+    fn age_style_is_dark_gray() {
+        assert_eq!(age_style().fg, Some(Color::DarkGray));
     }
 }
