@@ -179,6 +179,53 @@ impl App {
         let row = self.selected_rows.get(&col).copied().unwrap_or(0);
         entries.get(row).map(|(name, _)| *name)
     }
+
+    /// Move selection down within the current column (j key).
+    pub fn move_down(&mut self) {
+        let Some(col) = self.current_column() else {
+            return;
+        };
+        let count = self.sessions_in_column(col).len();
+        if count == 0 {
+            return;
+        }
+        let row = self.selected_rows.entry(col).or_insert(0);
+        if *row + 1 < count {
+            *row += 1;
+        }
+    }
+
+    /// Move selection up within the current column (k key).
+    pub fn move_up(&mut self) {
+        let Some(col) = self.current_column() else {
+            return;
+        };
+        let row = self.selected_rows.entry(col).or_insert(0);
+        if *row > 0 {
+            *row -= 1;
+        }
+    }
+
+    /// Move selection to the previous visible column (h key).
+    pub fn move_left(&mut self) {
+        if self.visible_columns().is_empty() {
+            return;
+        }
+        if self.selected_column > 0 {
+            self.selected_column -= 1;
+        }
+    }
+
+    /// Move selection to the next visible column (l key).
+    pub fn move_right(&mut self) {
+        let visible = self.visible_columns();
+        if visible.is_empty() {
+            return;
+        }
+        if self.selected_column + 1 < visible.len() {
+            self.selected_column += 1;
+        }
+    }
 }
 
 /// Load all sessions from a directory into a HashMap.
@@ -340,6 +387,124 @@ mod tests {
 
         app.process_watcher_events();
         assert!(app.sessions.is_empty());
+    }
+
+    #[test]
+    fn move_down_increments_row() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
+        write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        assert_eq!(app.selected_rows.get(&Column::Working).copied().unwrap_or(0), 0);
+        app.move_down();
+        assert_eq!(app.selected_rows.get(&Column::Working).copied(), Some(1));
+    }
+
+    #[test]
+    fn move_down_clamps_at_bottom() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.move_down(); // already at last (only) item
+        assert_eq!(app.selected_rows.get(&Column::Working).copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn move_up_decrements_row() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
+        write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.selected_rows.insert(Column::Working, 1);
+        app.move_up();
+        assert_eq!(app.selected_rows.get(&Column::Working).copied(), Some(0));
+    }
+
+    #[test]
+    fn move_up_clamps_at_top() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.move_up(); // already at 0
+        assert_eq!(app.selected_rows.get(&Column::Working).copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn move_right_advances_column() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        // Initial focus is Waiting (index 0)
+        assert_eq!(app.current_column(), Some(Column::Waiting));
+        app.move_right();
+        assert_eq!(app.current_column(), Some(Column::Working));
+    }
+
+    #[test]
+    fn move_right_clamps_at_last_column() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.move_right();
+        app.move_right(); // already at last column
+        assert_eq!(app.current_column(), Some(Column::Working));
+    }
+
+    #[test]
+    fn move_left_retreats_column() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.selected_column = 1; // Working
+        assert_eq!(app.current_column(), Some(Column::Working));
+        app.move_left();
+        assert_eq!(app.current_column(), Some(Column::Waiting));
+    }
+
+    #[test]
+    fn move_left_clamps_at_first_column() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.move_left(); // already at 0
+        assert_eq!(app.current_column(), Some(Column::Waiting));
+    }
+
+    #[test]
+    fn navigation_skips_empty_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        // Only Waiting and Done exist — Working and Idle are empty/hidden
+        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "b", &make_session(Status::Done, 200)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        assert_eq!(app.current_column(), Some(Column::Waiting));
+        app.move_right();
+        // Should jump straight to Done, skipping empty Working and Idle
+        assert_eq!(app.current_column(), Some(Column::Done));
+    }
+
+    #[test]
+    fn navigation_noop_on_empty_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        // All should be no-ops
+        app.move_up();
+        app.move_down();
+        app.move_left();
+        app.move_right();
+        assert!(app.current_column().is_none());
     }
 
     #[test]
