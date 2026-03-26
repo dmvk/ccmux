@@ -51,7 +51,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Init => todo!("init"),
         Commands::New { ref name } => {
             registry::validate_session_name(name)?;
-            todo!("new: launch zellij tab")
+            if registry::read_session(name)?.is_some() {
+                anyhow::bail!("session '{name}' already exists");
+            }
+            let env_var = format!("CCMUX_SESSION={name}");
+            zellij::new_tab(name, "env", &[&env_var, "claude"])?;
+            Ok(())
         }
         Commands::Attach { name: _ } => todo!("attach"),
         Commands::Kill { name: _ } => todo!("kill"),
