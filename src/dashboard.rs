@@ -7,7 +7,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Kanban columns displayed in the dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +21,11 @@ pub enum Column {
 /// Column display order (left to right).
 pub const COLUMN_ORDER: [Column; 4] =
     [Column::Waiting, Column::Working, Column::Idle, Column::Done];
+
+/// Debounce duration for Notification → waiting transitions per PRD §8.
+/// If a PreToolUse event arrives within this window, the session stays
+/// visually in `working` and never flashes yellow.
+const DEBOUNCE_DURATION: Duration = Duration::from_secs(5);
 
 impl Column {
     /// Column header title.
@@ -103,12 +108,29 @@ impl App {
         Ok(app)
     }
 
+    /// Returns the effective display column for a session, considering debounce.
+    /// During the debounce window, a session that is `Waiting` in the file
+    /// is shown in the `Working` column to prevent false "needs input" flashes.
+    fn effective_column(&self, name: &str, session: &Session) -> Column {
+        if session.status == Status::Waiting
+            && let Some(timer_start) = self.debounce_timers.get(name)
+            && timer_start.elapsed() < DEBOUNCE_DURATION
+        {
+            return Column::Working;
+        }
+        Column::from_status(&session.status)
+    }
+
     /// Returns columns that have at least one session, in display order.
     pub fn visible_columns(&self) -> Vec<Column> {
         COLUMN_ORDER
             .iter()
             .copied()
-            .filter(|col| !self.sessions_in_column(*col).is_empty())
+            .filter(|col| {
+                self.sessions
+                    .iter()
+                    .any(|(name, s)| self.effective_column(name, s) == *col)
+            })
             .collect()
     }
 
@@ -117,7 +139,7 @@ impl App {
         let mut entries: Vec<_> = self
             .sessions
             .iter()
-            .filter(|(_, s)| Column::from_status(&s.status) == col)
+            .filter(|(name, s)| self.effective_column(name, s) == col)
             .map(|(name, session)| (name.as_str(), session))
             .collect();
         entries.sort_by_key(|(_, s)| s.ts);
@@ -125,13 +147,43 @@ impl App {
     }
 
     /// Drain file watcher events and reload sessions if anything changed.
+    /// Manages debounce timers: starts a timer when a session transitions
+    /// to `waiting`, cancels it if the session leaves `waiting` within the window.
     pub fn process_watcher_events(&mut self) {
         let mut changed = false;
         while self.watcher_rx.try_recv().is_ok() {
             changed = true;
         }
         if changed {
+            // Snapshot which sessions were already waiting before reload
+            let previously_waiting: Vec<String> = self
+                .sessions
+                .iter()
+                .filter(|(_, s)| s.status == Status::Waiting)
+                .map(|(name, _)| name.clone())
+                .collect();
+
             self.sessions = load_sessions_from(&self.registry_dir);
+
+            // Manage debounce timers for waiting transitions
+            for (name, session) in &self.sessions {
+                if session.status == Status::Waiting {
+                    // Start debounce only for newly-waiting sessions
+                    if !previously_waiting.contains(name)
+                        && !self.debounce_timers.contains_key(name)
+                    {
+                        self.debounce_timers.insert(name.clone(), Instant::now());
+                    }
+                } else {
+                    // No longer waiting → cancel debounce
+                    self.debounce_timers.remove(name);
+                }
+            }
+
+            // Clean up timers for removed sessions
+            self.debounce_timers
+                .retain(|name, _| self.sessions.contains_key(name));
+
             self.clamp_selections();
         }
     }
@@ -224,6 +276,44 @@ impl App {
         }
         if self.selected_column + 1 < visible.len() {
             self.selected_column += 1;
+        }
+    }
+
+    /// Process debounce timers: remove expired timers and return session names
+    /// that have completed the debounce period and are now truly `waiting`.
+    /// The caller should trigger auto-focus for these sessions.
+    pub fn process_debounce_timers(&mut self) -> Vec<String> {
+        let mut newly_waiting = Vec::new();
+        self.debounce_timers.retain(|name, timer_start| {
+            if timer_start.elapsed() >= DEBOUNCE_DURATION {
+                // Timer expired — session has been waiting long enough
+                if let Some(session) = self.sessions.get(name)
+                    && session.status == Status::Waiting
+                {
+                    newly_waiting.push(name.clone());
+                }
+                false // remove expired timer
+            } else {
+                true // keep active timer
+            }
+        });
+        // Column assignments may have changed, re-clamp
+        if !newly_waiting.is_empty() {
+            self.clamp_selections();
+        }
+        newly_waiting
+    }
+
+    /// Auto-focus: jump selection to the Waiting column and the given session.
+    /// Called when a session completes its debounce and is now truly `waiting`.
+    pub fn auto_focus_session(&mut self, name: &str) {
+        let visible = self.visible_columns();
+        if let Some(idx) = visible.iter().position(|c| *c == Column::Waiting) {
+            self.selected_column = idx;
+            let entries = self.sessions_in_column(Column::Waiting);
+            if let Some(row) = entries.iter().position(|(n, _)| *n == name) {
+                self.selected_rows.insert(Column::Waiting, row);
+            }
         }
     }
 }
@@ -525,5 +615,176 @@ mod tests {
         app.process_watcher_events();
         // selected_rows for Working should be clamped to 0
         assert_eq!(app.selected_rows.get(&Column::Working).copied(), Some(0));
+    }
+
+    // --- Debounce tests ---
+
+    #[test]
+    fn initial_waiting_sessions_not_debounced() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
+
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        // No debounce timer for sessions loaded at startup
+        assert!(!app.debounce_timers.contains_key("sess"));
+        // Should appear directly in Waiting column
+        assert_eq!(app.sessions_in_column(Column::Waiting).len(), 1);
+        assert_eq!(app.sessions_in_column(Column::Working).len(), 0);
+    }
+
+    #[test]
+    fn debounce_new_waiting_starts_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Working, 100)).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        // Transition to waiting
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.process_watcher_events();
+
+        // Timer should be set
+        assert!(app.debounce_timers.contains_key("sess"));
+    }
+
+    #[test]
+    fn debounce_keeps_session_in_working_column() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Working, 100)).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        // Transition to waiting
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.process_watcher_events();
+
+        // During debounce, session should stay in Working column
+        assert_eq!(app.sessions_in_column(Column::Working).len(), 1);
+        assert_eq!(app.sessions_in_column(Column::Waiting).len(), 0);
+    }
+
+    #[test]
+    fn debounce_expired_timer_shows_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        // Manually insert an expired debounce timer (6s ago > 5s threshold)
+        app.debounce_timers
+            .insert("sess".to_string(), Instant::now() - Duration::from_secs(6));
+
+        // Expired timer should not suppress — session shows in Waiting
+        assert_eq!(app.sessions_in_column(Column::Waiting).len(), 1);
+        assert_eq!(app.sessions_in_column(Column::Working).len(), 0);
+    }
+
+    #[test]
+    fn debounce_cancelled_on_working_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Working, 100)).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        // Transition to waiting → starts debounce
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.process_watcher_events();
+        assert!(app.debounce_timers.contains_key("sess"));
+
+        // Transition back to working → cancels debounce
+        write_session_to(dir.path(), "sess", &make_session(Status::Working, 102)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.process_watcher_events();
+        assert!(!app.debounce_timers.contains_key("sess"));
+        assert_eq!(app.sessions_in_column(Column::Working).len(), 1);
+    }
+
+    #[test]
+    fn debounce_timer_cleanup_on_session_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Working, 100)).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        // Transition to waiting → starts debounce
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.process_watcher_events();
+        assert!(app.debounce_timers.contains_key("sess"));
+
+        // Remove session file → timer should be cleaned up
+        std::fs::remove_file(dir.path().join("sess.json")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.process_watcher_events();
+        assert!(!app.debounce_timers.contains_key("sess"));
+    }
+
+    #[test]
+    fn process_debounce_timers_returns_newly_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        // Insert expired timer
+        app.debounce_timers
+            .insert("sess".to_string(), Instant::now() - Duration::from_secs(6));
+
+        let newly_waiting = app.process_debounce_timers();
+        assert_eq!(newly_waiting, vec!["sess"]);
+        assert!(!app.debounce_timers.contains_key("sess"));
+    }
+
+    #[test]
+    fn process_debounce_timers_keeps_active_timers() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        // Insert a fresh timer (not expired)
+        app.debounce_timers
+            .insert("sess".to_string(), Instant::now());
+
+        let newly_waiting = app.process_debounce_timers();
+        assert!(newly_waiting.is_empty());
+        assert!(app.debounce_timers.contains_key("sess"));
+    }
+
+    #[test]
+    fn auto_focus_jumps_to_waiting_session() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
+        write_session_to(dir.path(), "b", &make_session(Status::Waiting, 200)).unwrap();
+        write_session_to(dir.path(), "c", &make_session(Status::Waiting, 300)).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        // Move focus to Working column
+        app.selected_column = app
+            .visible_columns()
+            .iter()
+            .position(|c| *c == Column::Working)
+            .unwrap();
+
+        // Auto-focus on the second waiting session
+        app.auto_focus_session("c");
+        assert_eq!(app.current_column(), Some(Column::Waiting));
+        assert_eq!(app.selected_rows.get(&Column::Waiting).copied(), Some(1));
+        assert_eq!(app.selected_session(), Some("c"));
+    }
+
+    #[test]
+    fn debounce_not_restarted_for_already_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        // No debounce timer — session loaded at startup
+        assert!(!app.debounce_timers.contains_key("sess"));
+
+        // Re-write with same status (e.g., new seq) — should NOT start debounce
+        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.process_watcher_events();
+
+        // Still no debounce timer (session was already waiting)
+        assert!(!app.debounce_timers.contains_key("sess"));
+        // Shows in Waiting column directly
+        assert_eq!(app.sessions_in_column(Column::Waiting).len(), 1);
     }
 }
