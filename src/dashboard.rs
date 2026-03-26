@@ -259,10 +259,18 @@ impl App {
         }
     }
 
-    /// Set initial column focus: prefer Waiting, then first visible.
+    /// Set initial column focus: prefer Waiting (if non-empty), then first non-empty column.
     fn focus_initial_column(&mut self) {
         let visible = self.visible_columns();
-        if let Some(idx) = visible.iter().position(|c| *c == Column::Waiting) {
+        if let Some(idx) = visible
+            .iter()
+            .position(|c| *c == Column::Waiting && !self.sessions_in_column(*c).is_empty())
+        {
+            self.selected_column = idx;
+        } else if let Some(idx) = visible
+            .iter()
+            .position(|c| !self.sessions_in_column(*c).is_empty())
+        {
             self.selected_column = idx;
         } else {
             self.selected_column = 0;
@@ -309,24 +317,29 @@ impl App {
         }
     }
 
-    /// Move selection to the previous visible column (h key).
+    /// Move selection to the previous column that has sessions (h key).
     pub fn move_left(&mut self) {
-        if self.visible_columns().is_empty() {
-            return;
-        }
-        if self.selected_column > 0 {
-            self.selected_column -= 1;
+        let visible = self.visible_columns();
+        for i in (0..self.selected_column).rev() {
+            if let Some(col) = visible.get(i) {
+                if !self.sessions_in_column(*col).is_empty() {
+                    self.selected_column = i;
+                    return;
+                }
+            }
         }
     }
 
-    /// Move selection to the next visible column (l key).
+    /// Move selection to the next column that has sessions (l key).
     pub fn move_right(&mut self) {
         let visible = self.visible_columns();
-        if visible.is_empty() {
-            return;
-        }
-        if self.selected_column + 1 < visible.len() {
-            self.selected_column += 1;
+        for i in (self.selected_column + 1)..visible.len() {
+            if let Some(col) = visible.get(i) {
+                if !self.sessions_in_column(*col).is_empty() {
+                    self.selected_column = i;
+                    return;
+                }
+            }
         }
     }
 
@@ -609,9 +622,9 @@ pub fn status_style(status: &Status) -> Style {
     }
 }
 
-/// Style for the selected row: dark blue background.
+/// Style for the selected-card left border.
 pub fn selected_style() -> Style {
-    Style::default().bg(Color::Blue)
+    Style::default().fg(Color::Blue)
 }
 
 /// Style for tool name display.
@@ -727,13 +740,13 @@ mod tests {
     }
 
     #[test]
-    fn initial_focus_falls_back_to_first_column() {
+    fn initial_focus_falls_back_to_first_occupied_column() {
         let dir = tempfile::tempdir().unwrap();
         write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        // No Waiting sessions, so falls back to first column (Waiting)
-        assert_eq!(app.current_column(), Some(Column::Waiting));
+        // No Waiting sessions, so falls back to first occupied column (Working)
+        assert_eq!(app.current_column(), Some(Column::Working));
     }
 
     #[test]
@@ -862,15 +875,15 @@ mod tests {
     }
 
     #[test]
-    fn move_right_clamps_at_last_column() {
+    fn move_right_clamps_at_last_occupied_column() {
         let dir = tempfile::tempdir().unwrap();
         write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
-        app.selected_column = 3; // Done (last column)
-        app.move_right(); // should stay at last column
-        assert_eq!(app.current_column(), Some(Column::Done));
+        app.selected_column = 1; // Working (last occupied column)
+        app.move_right(); // should stay — no sessions in Idle or Done
+        assert_eq!(app.current_column(), Some(Column::Working));
     }
 
     #[test]
@@ -897,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn navigation_traverses_all_columns() {
+    fn navigation_skips_empty_columns() {
         let dir = tempfile::tempdir().unwrap();
         write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Done, 200)).unwrap();
@@ -905,28 +918,27 @@ mod tests {
         let mut app = App::with_registry_dir(dir.path()).unwrap();
         assert_eq!(app.current_column(), Some(Column::Waiting));
         app.move_right();
-        // All columns are always visible, so next is Working
-        assert_eq!(app.current_column(), Some(Column::Working));
-        app.move_right();
-        assert_eq!(app.current_column(), Some(Column::Idle));
-        app.move_right();
+        // Skips Working and Idle (empty), jumps to Done
         assert_eq!(app.current_column(), Some(Column::Done));
+        app.move_right();
+        // Already at last occupied column
+        assert_eq!(app.current_column(), Some(Column::Done));
+        app.move_left();
+        // Back to Waiting, skipping empty columns
+        assert_eq!(app.current_column(), Some(Column::Waiting));
     }
 
     #[test]
-    fn navigation_on_empty_app_stays_bounded() {
+    fn navigation_on_empty_app_stays_put() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_registry_dir(dir.path()).unwrap();
-        // All columns visible even with no sessions
-        assert_eq!(app.current_column(), Some(Column::Waiting));
+        // All columns visible but empty — navigation stays put
+        let start = app.selected_column;
         app.move_up();
         app.move_down();
         app.move_left();
-        // Still at first column
-        assert_eq!(app.current_column(), Some(Column::Waiting));
-        // Can navigate right through all columns
         app.move_right();
-        assert_eq!(app.current_column(), Some(Column::Working));
+        assert_eq!(app.selected_column, start);
     }
 
     #[test]
@@ -1204,8 +1216,8 @@ mod tests {
     }
 
     #[test]
-    fn selected_style_has_dark_blue_bg() {
-        assert_eq!(selected_style().bg, Some(Color::Blue));
+    fn selected_style_has_blue_fg() {
+        assert_eq!(selected_style().fg, Some(Color::Blue));
     }
 
     #[test]

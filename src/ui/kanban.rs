@@ -90,20 +90,19 @@ fn render_column(
         }
 
         let is_sel = selected_row == Some(i);
-        let bg = if is_sel {
-            selected_style()
-        } else {
-            Style::default()
-        };
 
-        // Pre-fill card lines with bg when selected
+        // Draw thick left border for selected card
         if is_sel {
             let card_h = std::cmp::min(3, (area.y + area.height).saturating_sub(y));
-            let blank: String = " ".repeat(w as usize);
+            let border_style = selected_style();
             for dy in 0..card_h {
-                buf.set_string(area.x, y + dy, &blank, bg);
+                buf.set_string(area.x, y + dy, "▎", border_style);
             }
         }
+
+        // Content offset: leave 1 col for border indicator on selected cards
+        let cx = if is_sel { area.x + 1 } else { area.x };
+        let cw = if is_sel { w.saturating_sub(1) } else { w };
 
         // Line 1: icon name    age
         {
@@ -111,29 +110,29 @@ fn render_column(
             let age = format_age(session.ts, now);
             let age_w = age.chars().count();
 
-            buf.set_string(area.x, y, icon, status_style(&session.status).patch(bg));
+            buf.set_string(cx, y, icon, status_style(&session.status));
 
-            let name_avail = (w as usize).saturating_sub(3 + age_w);
+            let name_avail = (cw as usize).saturating_sub(3 + age_w);
             if name_avail > 0 {
                 buf.set_string(
-                    area.x + 2,
+                    cx + 2,
                     y,
                     truncate_str(name, name_avail),
-                    status_style(&session.status).patch(bg),
+                    status_style(&session.status),
                 );
             }
 
             // Age right-aligned
             let age_x = area.x + w - age_w as u16;
-            buf.set_string(age_x, y, &age, age_style().patch(bg));
+            buf.set_string(age_x, y, &age, age_style());
         }
         y += 1;
 
         // Line 2: tool (working/starting) or message (waiting)
         if y < area.y + area.height {
             let indent = 2u16;
-            let avail = (w as usize).saturating_sub(indent as usize);
-            let lx = area.x + indent;
+            let avail = (cw as usize).saturating_sub(indent as usize);
+            let lx = cx + indent;
 
             match session.status {
                 Status::Starting | Status::Working => {
@@ -142,7 +141,7 @@ fn render_column(
                             lx,
                             y,
                             truncate_str(tool, avail),
-                            tool_style().patch(bg),
+                            tool_style(),
                         );
                     }
                 }
@@ -152,7 +151,7 @@ fn render_column(
                             lx,
                             y,
                             truncate_str(msg, avail),
-                            msg_style(&session.status).patch(bg),
+                            msg_style(&session.status),
                         );
                     }
                 }
@@ -164,13 +163,13 @@ fn render_column(
         // Line 3: directory
         if y < area.y + area.height {
             let indent = 2u16;
-            let avail = (w as usize).saturating_sub(indent as usize);
+            let avail = (cw as usize).saturating_sub(indent as usize);
             if let Some(ref dir) = session.dir {
                 buf.set_string(
-                    area.x + indent,
+                    cx + indent,
                     y,
                     truncate_str(dir, avail),
-                    dir_style().patch(bg),
+                    dir_style(),
                 );
             }
             y += 1;
