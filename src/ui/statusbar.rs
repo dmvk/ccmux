@@ -34,7 +34,11 @@ pub fn render_statusbar(app: &App, area: Rect, buf: &mut Buffer) {
             let prefix = "session: ";
             let mid = format!("  status: {status_label}");
             let dir_part = format!("  dir: {dir}");
-            let full = format!("{prefix}{name}{mid}{dir_part}");
+            let token_part = session
+                .input_tokens
+                .map(|t| format!("  tokens: {}k", t / 1000))
+                .unwrap_or_default();
+            let full = format!("{prefix}{name}{mid}{dir_part}{token_part}");
 
             // Write the full string, truncated, then overlay colours
             let display = truncate_to(full, w);
@@ -78,7 +82,7 @@ fn status_label(status: &Status) -> &'static str {
     match status {
         Status::Starting => "starting",
         Status::Working => "working",
-        Status::Idle => "idle",
+        Status::Idle => "needs attention",
         Status::Done => "done",
     }
 }
@@ -158,7 +162,7 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("session:"), "session label present");
         assert!(text.contains("trading"), "session name present");
-        assert!(text.contains("idle"), "status label present");
+        assert!(text.contains("needs attention"), "status label present");
         assert!(text.contains("~/speedbets/trading"), "dir present");
     }
 
@@ -214,7 +218,7 @@ mod tests {
     fn status_label_all_variants() {
         assert_eq!(status_label(&Status::Starting), "starting");
         assert_eq!(status_label(&Status::Working), "working");
-        assert_eq!(status_label(&Status::Idle), "idle");
+        assert_eq!(status_label(&Status::Idle), "needs attention");
         assert_eq!(status_label(&Status::Done), "done");
     }
 
