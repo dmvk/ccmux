@@ -273,11 +273,29 @@ pub fn parse_new_bytes(bytes: &[u8]) -> Option<TranscriptUpdate> {
                     .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
             });
         let tool = found_tool.and_then(|item| item.get("name").and_then(|n| n.as_str())).map(String::from);
-        let desc = found_tool.and_then(|item| {
-            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let summary = summarize_tool_input(name, item.get("input"));
-            if summary.is_empty() { None } else { Some(summary) }
-        });
+        let desc = if found_tool.is_some() {
+            found_tool.and_then(|item| {
+                let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let summary = summarize_tool_input(name, item.get("input"));
+                if summary.is_empty() { None } else { Some(summary) }
+            })
+        } else {
+            // No tool_use block — extract text content as a "thinking" indicator
+            msg.get("content")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                item.get("text").and_then(|t| t.as_str()).filter(|s| !s.is_empty())
+                            } else {
+                                None
+                            }
+                        })
+                        .last()
+                })
+                .map(|s| truncate_str(s, 60))
+        };
 
         let input_tokens = msg.get("usage").map(|usage| {
             let base = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -484,17 +502,29 @@ mod tests {
         let update = parse_new_bytes(line.as_bytes()).unwrap();
         assert_eq!(update.status, Status::Idle);
         assert!(update.tool.is_none());
+        assert_eq!(update.desc.as_deref(), Some("Done."));
         assert_eq!(update.input_tokens, Some(12000));
     }
 
     #[test]
-    fn parse_streaming_chunk_is_working() {
-        // Intermediate messages (stop_reason: null) mean Claude is actively generating
+    fn parse_streaming_chunk_empty_content() {
+        // Empty content array — Claude just started, no text yet
         let line = r#"{"type":"assistant","message":{"stop_reason":null,"content":[],"usage":{"input_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10}}}"#;
         let update = parse_new_bytes(line.as_bytes()).unwrap();
         assert_eq!(update.status, Status::Working);
-        assert!(update.tool.is_none()); // no tool_use block in this intermediate msg
+        assert!(update.tool.is_none());
+        assert!(update.desc.is_none()); // no text content either
         assert_eq!(update.input_tokens, Some(500));
+    }
+
+    #[test]
+    fn parse_streaming_chunk_with_text_extracts_it() {
+        // Intermediate message with text but no tool — Claude is thinking/writing
+        let line = r#"{"type":"assistant","message":{"stop_reason":null,"content":[{"type":"text","text":"Let me look at the code and figure out what's happening."}],"usage":{"input_tokens":600,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":15}}}"#;
+        let update = parse_new_bytes(line.as_bytes()).unwrap();
+        assert_eq!(update.status, Status::Working);
+        assert!(update.tool.is_none());
+        assert_eq!(update.desc.as_deref(), Some("Let me look at the code and figure out what's happening."));
     }
 
     #[test]

@@ -353,16 +353,20 @@ impl App {
             if session.status == Status::Done {
                 return;
             }
-            // Only update tool/desc when the message contains a tool_use block.
-            // Intermediate text-only messages (stop_reason: null, no tool) should
-            // not blank out the last known tool — avoids card flickering.
             if update.tool.is_some() {
+                // Tool use — show the tool name + description
                 session.tool = update.tool;
                 session.desc = update.desc;
+            } else if update.desc.is_some() {
+                // Text-only message — Claude is thinking/writing, show the text
+                session.tool = None;
+                session.desc = update.desc;
             } else if update.status == Status::Idle {
+                // End of turn — clear everything
                 session.tool = None;
                 session.desc = None;
             }
+            // Otherwise (no tool, no text, still Working) — preserve previous state
             session.status = update.status;
             if update.input_tokens.is_some() {
                 session.input_tokens = update.input_tokens;

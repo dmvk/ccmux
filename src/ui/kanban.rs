@@ -152,15 +152,17 @@ fn render_column(
 
             match session.status {
                 Status::Starting | Status::Working => {
-                    if let Some(ref tool) = session.tool {
-                        let line2 = match session.desc {
-                            Some(ref d) => format!("{tool}: {d}"),
-                            None => tool.clone(),
-                        };
+                    let line2 = match (&session.tool, &session.desc) {
+                        (Some(tool), Some(d)) => Some(format!("{tool}: {d}")),
+                        (Some(tool), None) => Some(tool.clone()),
+                        (None, Some(d)) => Some(d.clone()),
+                        (None, None) => None,
+                    };
+                    if let Some(text) = line2 {
                         buf.set_string(
                             lx,
                             y,
-                            truncate_str(&line2, avail),
+                            truncate_str(&text, avail),
                             tool_style(),
                         );
                     }
