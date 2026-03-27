@@ -662,6 +662,7 @@ async fn run_loop(
     Ok(())
 }
 
+/// Convert transcript entries into preview lines, inserting separators between turns.
 fn build_preview_lines(
     entries: &[crate::transcript::TranscriptEntry],
 ) -> Vec<crate::ui::preview::PreviewLine> {
