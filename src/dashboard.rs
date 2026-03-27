@@ -142,14 +142,19 @@ impl App {
             transcript_offsets: HashMap::new(),
         };
 
-        // Watch transcript files for sessions that already exist
-        for session in app.sessions.values() {
-            if let Some(ref path) = session.transcript_path {
+        // Watch transcript files for sessions that already exist and do initial reads
+        let names: Vec<String> = app.sessions.iter()
+            .filter(|(_, s)| s.transcript_path.is_some())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &names {
+            if let Some(ref path) = app.sessions[name].transcript_path {
                 let path = std::path::Path::new(path);
                 if path.exists() {
                     let _ = app._watcher.watch(path, notify::RecursiveMode::NonRecursive);
                 }
             }
+            app.read_transcript(name);
         }
 
         app.focus_initial_column();
@@ -185,7 +190,8 @@ impl App {
         let old_sessions = std::mem::take(&mut self.sessions);
         self.sessions = load_sessions_from(&self.registry_dir);
 
-        // Watch transcripts for new sessions that have a transcript_path
+        // Watch transcripts for new sessions and collect names for initial read
+        let mut new_transcript_sessions: Vec<String> = Vec::new();
         for (name, session) in &self.sessions {
             if !old_sessions.contains_key(name)
                 && let Some(ref path) = session.transcript_path {
@@ -193,6 +199,7 @@ impl App {
                     if path.exists() {
                         let _ = self._watcher.watch(path, notify::RecursiveMode::NonRecursive);
                     }
+                    new_transcript_sessions.push(name.clone());
                 }
         }
 
@@ -203,6 +210,11 @@ impl App {
                     let _ = self._watcher.unwatch(std::path::Path::new(path));
                     self.transcript_offsets.remove(name);
                 }
+        }
+
+        // Initial transcript read for newly discovered sessions
+        for name in &new_transcript_sessions {
+            self.read_transcript(name);
         }
 
         self.clamp_selections();
