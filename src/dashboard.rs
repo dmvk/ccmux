@@ -493,7 +493,10 @@ impl App {
 
     /// Scroll the preview panel up (toward older content).
     pub fn preview_scroll_up(&mut self) {
-        self.preview_scroll_offset += 1;
+        let max = self.preview_lines.len().saturating_sub(1);
+        if self.preview_scroll_offset < max {
+            self.preview_scroll_offset += 1;
+        }
     }
 
     /// Scroll the preview panel down (toward newer content).
@@ -520,9 +523,7 @@ impl App {
                     return;
                 }
             }
-            self.preview_lines = vec![crate::ui::preview::PreviewLine::User(
-                "(transcript not available)".to_string(),
-            )];
+            self.preview_lines.clear();
         }
     }
 
@@ -1553,11 +1554,16 @@ mod preview_key_tests {
 
     #[test]
     fn preview_up_down_scrolls() {
+        use crate::ui::preview::PreviewLine;
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_registry_dir(dir.path()).unwrap();
         app.input_mode = InputMode::Preview;
         app.preview_session = Some("s".to_string());
         app.preview_scroll_offset = 0;
+        // Need enough lines for scrolling to work
+        app.preview_lines = (0..20)
+            .map(|i| PreviewLine::Assistant(format!("msg {i}")))
+            .collect();
 
         handle_key(&mut app, KeyCode::Up);
         assert_eq!(app.preview_scroll_offset, 1);

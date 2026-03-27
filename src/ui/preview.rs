@@ -35,8 +35,9 @@ pub fn render_preview(app: &App, area: Rect, buf: &mut Buffer) {
     let hint_style = Style::default().fg(Color::DarkGray);
 
     buf.set_string(area.x, area.y, &header_left, header_style);
-    if w > header_right.len() {
-        let right_x = area.x + (w - header_right.len()) as u16;
+    let hint_width = header_right.chars().count();
+    if w > hint_width {
+        let right_x = area.x + (w - hint_width) as u16;
         buf.set_string(right_x, area.y, header_right, hint_style);
     }
 
