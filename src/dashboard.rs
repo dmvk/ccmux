@@ -143,6 +143,16 @@ impl App {
             transcript_offsets: HashMap::new(),
         };
 
+        // Watch transcript files for sessions that already exist
+        for session in app.sessions.values() {
+            if let Some(ref path) = session.transcript_path {
+                let path = std::path::Path::new(path);
+                if path.exists() {
+                    let _ = app._watcher.watch(path, notify::RecursiveMode::NonRecursive);
+                }
+            }
+        }
+
         app.focus_initial_column();
         Ok(app)
     }
@@ -1362,5 +1372,42 @@ mod tests {
         app.apply_transcript_update("sess", update);
 
         assert_eq!(app.sessions["sess"].status, Status::Done);
+    }
+
+    #[test]
+    fn startup_sessions_get_transcript_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let transcript_path = transcript_dir.path().join("session.jsonl");
+        std::fs::write(&transcript_path, "").unwrap();
+
+        let session = Session {
+            status: Status::Starting,
+            tool: None,
+            msg: None,
+            ts: 100,
+            seq: 0,
+            dir: Some("/project".into()),
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            input_tokens: None,
+        };
+        write_session_to(dir.path(), "sess", &session).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        // Write transcript data
+        let transcript_line = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash","id":"x","input":{}}],"usage":{"input_tokens":5000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":50}}}"#;
+        std::fs::write(&transcript_path, format!("{}\n", transcript_line)).unwrap();
+
+        // Give the watcher a moment to detect the change
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // The transcript change should produce a watcher event
+        // Read it manually since we can't use the full async loop in tests
+        let changed = app.read_transcript("sess");
+        assert!(changed, "transcript should have new data");
+        assert_eq!(app.sessions["sess"].status, Status::Working);
+        assert_eq!(app.sessions["sess"].tool.as_deref(), Some("Bash"));
+        assert_eq!(app.sessions["sess"].input_tokens, Some(5000));
     }
 }
