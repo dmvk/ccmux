@@ -278,13 +278,13 @@ mod tests {
         let app = App::with_registry_dir(dir.path()).unwrap();
         assert_eq!(app.sessions.len(), 2);
 
-        // Check column assignments — Starting status maps to the Working column
+        // Check column assignments — Starting status maps to NeedsAttention (waiting for input)
         use crate::dashboard::Column;
-        let working = app.sessions_in_column(Column::Working);
+        let needs_attention = app.sessions_in_column(Column::NeedsAttention);
         let done = app.sessions_in_column(Column::Done);
 
-        assert_eq!(working.len(), 1);
-        assert_eq!(working[0].0, "alpha");
+        assert_eq!(needs_attention.len(), 1);
+        assert_eq!(needs_attention[0].0, "alpha");
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].0, "gamma");
     }

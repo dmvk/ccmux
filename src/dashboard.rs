@@ -50,8 +50,8 @@ impl Column {
     /// Map a session status to its kanban column.
     pub fn from_status(status: &Status) -> Column {
         match status {
-            Status::Idle => Column::NeedsAttention,
-            Status::Starting | Status::Working => Column::Working,
+            Status::Starting | Status::Idle => Column::NeedsAttention,
+            Status::Working => Column::Working,
             Status::Done => Column::Done,
         }
     }
@@ -787,8 +787,8 @@ mod tests {
     #[test]
     fn column_from_status_mapping() {
         assert_eq!(Column::from_status(&Status::Idle), Column::NeedsAttention);
+        assert_eq!(Column::from_status(&Status::Starting), Column::NeedsAttention);
         assert_eq!(Column::from_status(&Status::Working), Column::Working);
-        assert_eq!(Column::from_status(&Status::Starting), Column::Working);
         assert_eq!(Column::from_status(&Status::Done), Column::Done);
     }
 
@@ -881,13 +881,14 @@ mod tests {
     }
 
     #[test]
-    fn starting_status_groups_with_working() {
+    fn starting_status_groups_with_needs_attention() {
         let dir = tempfile::tempdir().unwrap();
         write_session_to(dir.path(), "init", &make_session(Status::Starting, 100)).unwrap();
         write_session_to(dir.path(), "run", &make_session(Status::Working, 200)).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.sessions_in_column(Column::Working).len(), 2);
+        assert_eq!(app.sessions_in_column(Column::NeedsAttention).len(), 1);
+        assert_eq!(app.sessions_in_column(Column::Working).len(), 1);
     }
 
     #[test]
