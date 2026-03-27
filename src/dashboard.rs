@@ -481,6 +481,16 @@ impl App {
         self.preview_scroll_offset = 0;
     }
 
+    /// Sync the preview panel to the currently selected card.
+    /// Called after h/j/k/l navigation in Preview mode.
+    fn sync_preview_to_selection(&mut self) {
+        if let Some(name) = self.selected_session() {
+            self.preview_session = Some(name.to_string());
+            self.preview_scroll_offset = 0;
+            self.refresh_preview();
+        }
+    }
+
     /// Scroll the preview panel up (toward older content).
     pub fn preview_scroll_up(&mut self) {
         self.preview_scroll_offset += 1;
@@ -731,7 +741,28 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Char('p') => app.open_preview(),
             _ => {}
         },
-        InputMode::Preview => if code == KeyCode::Esc { app.close_preview() },
+        InputMode::Preview => match code {
+            KeyCode::Esc => app.close_preview(),
+            KeyCode::Char('h') => {
+                app.move_left();
+                app.sync_preview_to_selection();
+            }
+            KeyCode::Char('j') => {
+                app.move_down();
+                app.sync_preview_to_selection();
+            }
+            KeyCode::Char('k') => {
+                app.move_up();
+                app.sync_preview_to_selection();
+            }
+            KeyCode::Char('l') => {
+                app.move_right();
+                app.sync_preview_to_selection();
+            }
+            KeyCode::Up => app.preview_scroll_up(),
+            KeyCode::Down => app.preview_scroll_down(),
+            _ => {}
+        },
         InputMode::NewSession => match code {
             KeyCode::Esc => app.close_modal(),
             KeyCode::Tab | KeyCode::BackTab => app.modal_toggle_field(),
@@ -1475,5 +1506,83 @@ mod tests {
         assert_eq!(app.sessions["sess"].status, Status::Working);
         assert_eq!(app.sessions["sess"].tool.as_deref(), Some("Bash"));
         assert_eq!(app.sessions["sess"].input_tokens, Some(5000));
+    }
+}
+
+#[cfg(test)]
+mod preview_key_tests {
+    use super::*;
+    use crate::registry::{write_session_to, Session, Status};
+
+    fn make_session(status: Status, ts: u64) -> Session {
+        Session {
+            status,
+            tool: None,
+            desc: None,
+            msg: None,
+            ts,
+            seq: 1,
+            dir: Some("~/project".to_string()),
+            session_id: None,
+            transcript_path: None,
+            input_tokens: None,
+        }
+    }
+
+    #[test]
+    fn preview_hjkl_navigates_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s1 = make_session(Status::Idle, 950);
+        s1.msg = Some("q1".to_string());
+        write_session_to(dir.path(), "alpha", &s1).unwrap();
+        let mut s2 = make_session(Status::Working, 980);
+        s2.tool = Some("Edit".to_string());
+        write_session_to(dir.path(), "beta", &s2).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.input_mode = InputMode::Preview;
+        app.preview_session = Some("alpha".to_string());
+
+        // Navigate right (l key) — should move to Working column
+        handle_key(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.preview_session.as_deref(), Some("beta"));
+        assert_eq!(app.preview_scroll_offset, 0);
+    }
+
+    #[test]
+    fn preview_up_down_scrolls() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.input_mode = InputMode::Preview;
+        app.preview_session = Some("s".to_string());
+        app.preview_scroll_offset = 0;
+
+        handle_key(&mut app, KeyCode::Up);
+        assert_eq!(app.preview_scroll_offset, 1);
+
+        handle_key(&mut app, KeyCode::Up);
+        assert_eq!(app.preview_scroll_offset, 2);
+
+        handle_key(&mut app, KeyCode::Down);
+        assert_eq!(app.preview_scroll_offset, 1);
+
+        handle_key(&mut app, KeyCode::Down);
+        assert_eq!(app.preview_scroll_offset, 0);
+
+        // Can't go below 0
+        handle_key(&mut app, KeyCode::Down);
+        assert_eq!(app.preview_scroll_offset, 0);
+    }
+
+    #[test]
+    fn preview_esc_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.input_mode = InputMode::Preview;
+        app.preview_session = Some("s".to_string());
+
+        handle_key(&mut app, KeyCode::Esc);
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.preview_session.is_none());
     }
 }
