@@ -68,13 +68,12 @@ pub fn render_preview(app: &App, area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    // Scroll support: use preview_scroll_offset to calculate visible window
-    let offset = app.preview_scroll_offset;
+    // Scroll: offset 0 = show tail (most recent at bottom)
     let total = lines.len();
-
-    // Default view shows tail (most recent at bottom), offset scrolls up from there
-    let end = total.saturating_sub(offset);
-    let start = end.saturating_sub(body_height);
+    let max_offset = total.saturating_sub(body_height);
+    let offset = app.preview_scroll_offset.min(max_offset);
+    let start = total.saturating_sub(body_height + offset);
+    let end = start + body_height.min(total);
 
     for (i, line) in lines[start..end].iter().enumerate() {
         let y = area.y + 2 + i as u16;
@@ -131,12 +130,22 @@ fn render_line(line: &PreviewLine, x: u16, y: u16, max_width: usize, buf: &mut B
             let name_style = Style::default().fg(Color::Cyan);
             let desc_style = Style::default().fg(Color::DarkGray);
             buf.set_string(x + 1, y, label, label_style);
-            let name_x = x + 1 + label.len() as u16;
-            buf.set_string(name_x, y, name, name_style);
-            let desc_x = name_x + name.len() as u16 + 1;
-            let remaining = max_width.saturating_sub(1 + label.len() + name.len() + 1);
-            let display: String = desc.chars().take(remaining).collect();
-            buf.set_string(desc_x, y, &display, desc_style);
+            let mut offset = 1 + label.len();
+            let name_display: String = name
+                .chars()
+                .take(max_width.saturating_sub(offset))
+                .collect();
+            buf.set_string(x + offset as u16, y, &name_display, name_style);
+            offset += name_display.len();
+            if !desc.is_empty() && offset < max_width {
+                buf.set_string(x + offset as u16, y, " ", desc_style);
+                offset += 1;
+                let desc_display: String = desc
+                    .chars()
+                    .take(max_width.saturating_sub(offset))
+                    .collect();
+                buf.set_string(x + offset as u16, y, &desc_display, desc_style);
+            }
         }
         PreviewLine::Separator => {
             // Blank line — nothing rendered
