@@ -663,6 +663,12 @@ async fn run_loop(
                                     let name = name.clone();
                                     app.auto_focus_session(&name);
                                 }
+                            // Live-refresh preview if this session is being previewed
+                            if app.input_mode == InputMode::Preview
+                                && app.preview_session.as_deref() == Some(&name)
+                            {
+                                app.refresh_preview();
+                            }
                         }
                     } else {
                         app.process_watcher_events();
@@ -671,10 +677,6 @@ async fn run_loop(
             }
             _ = tick.tick() => {
                 // 1-second tick for age display refresh — triggers redraw
-                // Also refresh preview transcript on each tick
-                if app.input_mode == InputMode::Preview {
-                    app.refresh_preview();
-                }
             }
         }
     }
