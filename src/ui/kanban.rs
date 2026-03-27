@@ -104,7 +104,7 @@ fn render_column(
         let cx = if is_sel { area.x + 1 } else { area.x };
         let cw = if is_sel { w.saturating_sub(1) } else { w };
 
-        // Line 1: icon name    age
+        // Line 1: icon name  ▰▰▰▱▱▱▱▱ 34k  14m
         {
             let icon = status_icon(&session.status);
             let age = format_age(session.ts, now);
@@ -112,7 +112,17 @@ fn render_column(
 
             buf.set_string(cx, y, icon, status_style(&session.status));
 
-            let name_avail = (cw as usize).saturating_sub(3 + age_w);
+            // Token bar + count (only if we have token data)
+            let token_part = session.input_tokens.map(|tokens| {
+                let bar = token_bar(tokens);
+                let count = format_tokens(tokens);
+                let color = token_bar_color(tokens);
+                (bar, count, color)
+            });
+            let token_w = token_part.as_ref().map_or(0, |(bar, count, _)| bar.chars().count() + 1 + count.len());
+
+            // Name gets remaining space
+            let name_avail = (cw as usize).saturating_sub(2 + 1 + token_w + 1 + age_w + 1);
             if name_avail > 0 {
                 buf.set_string(
                     cx + 2,
@@ -120,6 +130,13 @@ fn render_column(
                     truncate_str(name, name_avail),
                     status_style(&session.status),
                 );
+            }
+
+            // Token bar right-aligned before age
+            if let Some((bar, count, color)) = token_part {
+                let token_str = format!("{} {}", bar, count);
+                let token_x = area.x + w - (age_w + 1 + token_str.chars().count()) as u16;
+                buf.set_string(token_x, y, &token_str, Style::default().fg(color));
             }
 
             // Age right-aligned
@@ -204,6 +221,33 @@ fn header_style(col: &Column) -> Style {
         Column::NeedsAttention => Style::default().fg(Color::Yellow),
         Column::Working => Style::default().fg(Color::Blue),
         Column::Done => Style::default().fg(Color::Green),
+    }
+}
+
+const TOKEN_SCALE: u64 = 100_000;
+const TOKEN_BAR_WIDTH: u64 = 8;
+
+/// Format a token count as "34k".
+fn format_tokens(tokens: u64) -> String {
+    format!("{}k", tokens / 1000)
+}
+
+/// Generate the token bar string: filled blocks then empty blocks.
+fn token_bar(tokens: u64) -> String {
+    let clamped = tokens.min(TOKEN_SCALE);
+    let filled = (clamped * TOKEN_BAR_WIDTH / TOKEN_SCALE) as usize;
+    let empty = (TOKEN_BAR_WIDTH as usize) - filled;
+    format!("{}{}", "▰".repeat(filled), "▱".repeat(empty))
+}
+
+/// Choose bar color based on token count.
+fn token_bar_color(tokens: u64) -> Color {
+    if tokens >= 70_000 {
+        Color::Red
+    } else if tokens >= 40_000 {
+        Color::Yellow
+    } else {
+        Color::Green
     }
 }
 
@@ -442,5 +486,73 @@ mod tests {
 
         let text = buffer_text(&buf);
         assert!(text.contains('·'), "dot separator between cards");
+    }
+
+    #[test]
+    fn format_tokens_display() {
+        assert_eq!(format_tokens(0), "0k");
+        assert_eq!(format_tokens(500), "0k");
+        assert_eq!(format_tokens(1000), "1k");
+        assert_eq!(format_tokens(34000), "34k");
+        assert_eq!(format_tokens(34500), "34k");
+        assert_eq!(format_tokens(100000), "100k");
+        assert_eq!(format_tokens(150000), "150k");
+    }
+
+    #[test]
+    fn token_bar_string_generation() {
+        assert_eq!(token_bar(0), "▱▱▱▱▱▱▱▱");
+        assert_eq!(token_bar(12500), "▰▱▱▱▱▱▱▱");
+        assert_eq!(token_bar(50000), "▰▰▰▰▱▱▱▱");
+        assert_eq!(token_bar(100000), "▰▰▰▰▰▰▰▰");
+        assert_eq!(token_bar(150000), "▰▰▰▰▰▰▰▰");
+    }
+
+    #[test]
+    fn token_bar_color_thresholds() {
+        assert_eq!(token_bar_color(0), Color::Green);
+        assert_eq!(token_bar_color(39000), Color::Green);
+        assert_eq!(token_bar_color(40000), Color::Yellow);
+        assert_eq!(token_bar_color(69000), Color::Yellow);
+        assert_eq!(token_bar_color(70000), Color::Red);
+        assert_eq!(token_bar_color(150000), Color::Red);
+    }
+
+    #[test]
+    fn render_card_with_token_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = make_session(Status::Working, 950);
+        session.tool = Some("Edit".to_string());
+        session.input_tokens = Some(34000);
+        write_session_to(dir.path(), "trading", &session).unwrap();
+
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        // Use 120 wide so each of the 3 columns gets ~39 chars — enough for
+        // name + token bar + age to all appear simultaneously.
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        render_kanban(&app, area, &mut buf, 1000);
+
+        let text = buffer_text(&buf);
+        assert!(text.contains("▰▰"), "token bar present");
+        assert!(text.contains("34k"), "token count present");
+        assert!(text.contains("trading"), "session name present");
+    }
+
+    #[test]
+    fn render_card_without_token_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = make_session(Status::Starting, 990);
+        write_session_to(dir.path(), "fresh", &session).unwrap();
+
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        render_kanban(&app, area, &mut buf, 1000);
+
+        let text = buffer_text(&buf);
+        assert!(text.contains("fresh"), "session name present");
+        assert!(!text.contains("▰"), "no token bar when no data");
+        assert!(!text.contains("▱"), "no token bar when no data");
     }
 }
