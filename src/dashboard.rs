@@ -1,5 +1,4 @@
 // Ratatui app loop, event handling, debounce
-#![allow(dead_code)]
 
 use crate::registry::{self, Session, Status};
 use anyhow::{Context, Result};
@@ -189,24 +188,22 @@ impl App {
 
         // Watch transcripts for new sessions that have a transcript_path
         for (name, session) in &self.sessions {
-            if !old_sessions.contains_key(name) {
-                if let Some(ref path) = session.transcript_path {
+            if !old_sessions.contains_key(name)
+                && let Some(ref path) = session.transcript_path {
                     let path = std::path::Path::new(path);
                     if path.exists() {
                         let _ = self._watcher.watch(path, notify::RecursiveMode::NonRecursive);
                     }
                 }
-            }
         }
 
         // Unwatch transcripts for removed sessions
         for (name, session) in &old_sessions {
-            if !self.sessions.contains_key(name) {
-                if let Some(ref path) = session.transcript_path {
+            if !self.sessions.contains_key(name)
+                && let Some(ref path) = session.transcript_path {
                     let _ = self._watcher.unwatch(std::path::Path::new(path));
                     self.transcript_offsets.remove(name);
                 }
-            }
         }
 
         self.clamp_selections();
@@ -316,12 +313,11 @@ impl App {
     pub fn move_left(&mut self) {
         let visible = self.visible_columns();
         for i in (0..self.selected_column).rev() {
-            if let Some(col) = visible.get(i) {
-                if !self.sessions_in_column(*col).is_empty() {
+            if let Some(col) = visible.get(i)
+                && !self.sessions_in_column(*col).is_empty() {
                     self.selected_column = i;
                     return;
                 }
-            }
         }
     }
 
@@ -329,12 +325,11 @@ impl App {
     pub fn move_right(&mut self) {
         let visible = self.visible_columns();
         for i in (self.selected_column + 1)..visible.len() {
-            if let Some(col) = visible.get(i) {
-                if !self.sessions_in_column(*col).is_empty() {
+            if let Some(col) = visible.get(i)
+                && !self.sessions_in_column(*col).is_empty() {
                     self.selected_column = i;
                     return;
                 }
-            }
         }
     }
 
@@ -603,11 +598,10 @@ async fn run_loop(
 
         tokio::select! {
             Some(event) = key_stream.next() => {
-                if let Ok(Event::Key(key)) = event {
-                    if key.kind == KeyEventKind::Press {
+                if let Ok(Event::Key(key)) = event
+                    && key.kind == KeyEventKind::Press {
                         handle_key(app, key.code);
                     }
-                }
             }
             Some(event) = app.watcher_rx.recv() => {
                 if let Ok(event) = event {
@@ -617,14 +611,12 @@ async fn run_loop(
                     if is_transcript {
                         if let Some(name) = app.session_for_transcript_path(&event.paths) {
                             let changed = app.read_transcript(&name);
-                            if changed {
-                                if let Some(s) = app.sessions.get(&name) {
-                                    if s.status == Status::Idle {
-                                        let name = name.clone();
-                                        app.auto_focus_session(&name);
-                                    }
+                            if changed
+                                && let Some(s) = app.sessions.get(&name)
+                                && s.status == Status::Idle {
+                                    let name = name.clone();
+                                    app.auto_focus_session(&name);
                                 }
-                            }
                         }
                     } else {
                         app.process_watcher_events();
@@ -1324,10 +1316,12 @@ mod tests {
         let session = Session {
             status: Status::Starting,
             tool: None,
+            desc: None,
             msg: None,
             ts: 100,
             seq: 0,
             dir: Some("/project".into()),
+            session_id: None,
             transcript_path: Some(transcript_path.to_string_lossy().to_string()),
             input_tokens: None,
         };
@@ -1354,10 +1348,12 @@ mod tests {
         let session = Session {
             status: Status::Done,
             tool: None,
+            desc: None,
             msg: None,
             ts: 100,
             seq: 0,
             dir: None,
+            session_id: None,
             transcript_path: None,
             input_tokens: None,
         };
@@ -1384,10 +1380,12 @@ mod tests {
         let session = Session {
             status: Status::Starting,
             tool: None,
+            desc: None,
             msg: None,
             ts: 100,
             seq: 0,
             dir: Some("/project".into()),
+            session_id: None,
             transcript_path: Some(transcript_path.to_string_lossy().to_string()),
             input_tokens: None,
         };

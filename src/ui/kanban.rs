@@ -1,5 +1,4 @@
 // Column + card widgets for the kanban dashboard
-#![allow(dead_code)]
 
 use crate::dashboard::{
     age_style, dir_style, format_age, msg_style, selected_style, status_icon, status_style,
@@ -258,11 +257,10 @@ fn shorten_home(path: &str) -> String {
         if path == home.as_ref() {
             return "~".to_string();
         }
-        if let Some(rest) = path.strip_prefix(home.as_ref()) {
-            if rest.starts_with('/') {
+        if let Some(rest) = path.strip_prefix(home.as_ref())
+            && rest.starts_with('/') {
                 return format!("~{rest}");
             }
-        }
     }
     path.to_string()
 }
