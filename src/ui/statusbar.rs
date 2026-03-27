@@ -10,7 +10,7 @@ use ratatui::style::{Color, Style};
 /// Render the two-line status bar into the given area.
 ///
 /// Line 1: session info — `session: <name>  status: <status>  dir: <dir>`
-/// Line 2: key bindings — `h/j/k/l navigate · Enter attach · Ctrl+y back · x kill · q quit`
+/// Line 2: key bindings — `h/j/k/l navigate · Enter attach · n new · p preview · x kill · q quit`
 pub fn render_statusbar(app: &App, area: Rect, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -69,7 +69,7 @@ pub fn render_statusbar(app: &App, area: Rect, buf: &mut Buffer) {
 
     // Line 2: key bindings
     if area.height >= 2 {
-        let help = "h/j/k/l navigate \u{00b7} Enter attach \u{00b7} n new \u{00b7} p preview \u{00b7} x kill \u{00b7} Ctrl+y back \u{00b7} q quit";
+        let help = "h/j/k/l navigate \u{00b7} Enter attach \u{00b7} n new \u{00b7} p preview \u{00b7} x kill \u{00b7} q quit";
         let x = area.x + 1;
         let y = area.y + 1;
         let w = area.width.saturating_sub(1) as usize;
