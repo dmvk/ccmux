@@ -456,9 +456,10 @@ impl App {
     pub fn refresh_preview(&mut self) {
         if let Some(ref name) = self.preview_session {
             if let Some(session) = self.sessions.get(name) {
-                if let (Some(dir), Some(sid)) = (&session.dir, &session.session_id) {
-                    if let Some(path) = crate::transcript::transcript_path(dir, sid) {
-                        let entries = crate::transcript::read_tail_all(&path, 50);
+                if let Some(ref tp) = session.transcript_path {
+                    let path = std::path::Path::new(tp);
+                    if path.exists() {
+                        let entries = crate::transcript::read_tail_all(path, 50);
                         self.preview_lines = entries
                             .iter()
                             .map(crate::transcript::format_entry)

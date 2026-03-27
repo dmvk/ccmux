@@ -12,7 +12,6 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
 
 use serde_json::Value;
 
@@ -28,28 +27,6 @@ pub enum TranscriptEntry {
     Tool(String),
 }
 
-/// Encode a project directory path into the Claude projects directory name.
-/// Replaces every `/` with `-`.
-pub fn encode_project_path(dir: &str) -> String {
-    dir.replace('/', "-")
-}
-
-/// Build the path to a session's transcript JSONL file.
-/// Returns `None` if the file doesn't exist.
-pub fn transcript_path(dir: &str, session_id: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let encoded = encode_project_path(dir);
-    let path = PathBuf::from(home)
-        .join(".claude")
-        .join("projects")
-        .join(&encoded)
-        .join(format!("{session_id}.jsonl"));
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
-}
 
 /// Summarize tool input for compact display.
 fn summarize_tool_input(tool_name: &str, input: Option<&serde_json::Value>) -> String {
@@ -328,19 +305,6 @@ mod tests {
     use super::*;
 
     // ── Preview panel tests ──────────────────────────────────────────
-
-    #[test]
-    fn encode_project_path_replaces_slashes() {
-        assert_eq!(
-            encode_project_path("/Users/bob/Workspace/ccmux"),
-            "-Users-bob-Workspace-ccmux"
-        );
-    }
-
-    #[test]
-    fn encode_project_path_no_slashes() {
-        assert_eq!(encode_project_path("project"), "project");
-    }
 
     #[test]
     fn truncate_str_short() {
