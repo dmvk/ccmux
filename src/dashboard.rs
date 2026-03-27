@@ -170,30 +170,55 @@ impl App {
         while self.watcher_rx.try_recv().is_ok() {
             changed = true;
         }
-        if changed {
-            self.sessions = load_sessions_from(&self.registry_dir);
+        if !changed {
+            return;
+        }
 
-            self.clamp_selections();
+        let old_sessions = std::mem::take(&mut self.sessions);
+        self.sessions = load_sessions_from(&self.registry_dir);
 
-            // Auto-focus a session created from the dashboard modal
-            if let Some(ref focus_name) = self.pending_focus
-                && self.sessions.contains_key(focus_name)
-            {
-                let focus_name = focus_name.clone();
-                self.pending_focus = None;
-                // Find which column it's in and focus it
-                let col = self
-                    .sessions
-                    .get(&focus_name)
-                    .map(|s| Column::from_status(&s.status))
-                    .unwrap_or(Column::Working);
-                let visible = self.visible_columns();
-                if let Some(col_idx) = visible.iter().position(|c| *c == col) {
-                    self.selected_column = col_idx;
-                    let entries = self.sessions_in_column(col);
-                    if let Some(row) = entries.iter().position(|(n, _)| *n == focus_name) {
-                        self.selected_rows.insert(col, row);
+        // Watch transcripts for new sessions that have a transcript_path
+        for (name, session) in &self.sessions {
+            if !old_sessions.contains_key(name) {
+                if let Some(ref path) = session.transcript_path {
+                    let path = std::path::Path::new(path);
+                    if path.exists() {
+                        let _ = self._watcher.watch(path, notify::RecursiveMode::NonRecursive);
                     }
+                }
+            }
+        }
+
+        // Unwatch transcripts for removed sessions
+        for (name, session) in &old_sessions {
+            if !self.sessions.contains_key(name) {
+                if let Some(ref path) = session.transcript_path {
+                    let _ = self._watcher.unwatch(std::path::Path::new(path));
+                    self.transcript_offsets.remove(name);
+                }
+            }
+        }
+
+        self.clamp_selections();
+
+        // Auto-focus a session created from the dashboard modal
+        if let Some(ref focus_name) = self.pending_focus
+            && self.sessions.contains_key(focus_name)
+        {
+            let focus_name = focus_name.clone();
+            self.pending_focus = None;
+            // Find which column it's in and focus it
+            let col = self
+                .sessions
+                .get(&focus_name)
+                .map(|s| Column::from_status(&s.status))
+                .unwrap_or(Column::Working);
+            let visible = self.visible_columns();
+            if let Some(col_idx) = visible.iter().position(|c| *c == col) {
+                self.selected_column = col_idx;
+                let entries = self.sessions_in_column(col);
+                if let Some(row) = entries.iter().position(|(n, _)| *n == focus_name) {
+                    self.selected_rows.insert(col, row);
                 }
             }
         }
@@ -313,6 +338,79 @@ impl App {
                 self.selected_rows.insert(Column::NeedsAttention, row);
             }
         }
+    }
+
+    /// Apply a transcript update to a session's in-memory state.
+    /// Does not modify the registry file — transcript state is ephemeral.
+    /// Ignores updates for Done sessions (SessionEnd hook is authoritative).
+    pub fn apply_transcript_update(&mut self, name: &str, update: crate::transcript::TranscriptUpdate) {
+        if let Some(session) = self.sessions.get_mut(name) {
+            if session.status == Status::Done {
+                return;
+            }
+            session.status = update.status;
+            session.tool = update.tool;
+            if update.input_tokens.is_some() {
+                session.input_tokens = update.input_tokens;
+            }
+            session.ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+        }
+    }
+
+    /// Read new bytes from a transcript file and apply any updates.
+    /// Returns true if the session state changed.
+    pub fn read_transcript(&mut self, name: &str) -> bool {
+        let transcript_path = match self.sessions.get(name).and_then(|s| s.transcript_path.as_ref()) {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+
+        let mut file = match std::fs::File::open(&transcript_path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        let offset = self.transcript_offsets.get(name).copied().unwrap_or(0);
+        use std::io::{Read, Seek, SeekFrom};
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return false;
+        }
+
+        let mut buf = Vec::new();
+        let bytes_read = match file.read_to_end(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+
+        if bytes_read == 0 {
+            return false;
+        }
+
+        self.transcript_offsets.insert(name.to_string(), offset + bytes_read as u64);
+
+        if let Some(update) = crate::transcript::parse_new_bytes(&buf) {
+            self.apply_transcript_update(name, update);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Find which session name corresponds to a transcript file path.
+    fn session_for_transcript_path(&self, paths: &[std::path::PathBuf]) -> Option<String> {
+        for (name, session) in &self.sessions {
+            if let Some(ref tp) = session.transcript_path {
+                for path in paths {
+                    if path.to_string_lossy() == *tp {
+                        return Some(name.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Open the new-session modal, pre-filling the directory with the given default.
@@ -502,8 +600,25 @@ async fn run_loop(
                 }
             }
             Some(event) = app.watcher_rx.recv() => {
-                if event.is_ok() {
-                    app.process_watcher_events();
+                if let Ok(event) = event {
+                    let is_transcript = event.paths.iter().any(|p| {
+                        p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                    });
+                    if is_transcript {
+                        if let Some(name) = app.session_for_transcript_path(&event.paths) {
+                            let changed = app.read_transcript(&name);
+                            if changed {
+                                if let Some(s) = app.sessions.get(&name) {
+                                    if s.status == Status::Idle {
+                                        let name = name.clone();
+                                        app.auto_focus_session(&name);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        app.process_watcher_events();
+                    }
                 }
             }
             _ = tick.tick() => {
@@ -1186,5 +1301,66 @@ mod tests {
     #[test]
     fn expand_tilde_leaves_absolute_path() {
         assert_eq!(App::expand_tilde("/usr/local"), "/usr/local");
+    }
+
+    #[test]
+    fn transcript_update_changes_session_status_and_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let transcript_path = transcript_dir.path().join("session.jsonl");
+        std::fs::write(&transcript_path, "").unwrap();
+
+        let session = Session {
+            status: Status::Starting,
+            tool: None,
+            msg: None,
+            ts: 100,
+            seq: 0,
+            dir: Some("/project".into()),
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            input_tokens: None,
+        };
+        write_session_to(dir.path(), "sess", &session).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        let update = crate::transcript::TranscriptUpdate {
+            status: Status::Working,
+            tool: Some("Bash".into()),
+            input_tokens: Some(34000),
+        };
+        app.apply_transcript_update("sess", update);
+
+        let s = &app.sessions["sess"];
+        assert_eq!(s.status, Status::Working);
+        assert_eq!(s.tool.as_deref(), Some("Bash"));
+        assert_eq!(s.input_tokens, Some(34000));
+    }
+
+    #[test]
+    fn transcript_update_ignored_for_done_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session {
+            status: Status::Done,
+            tool: None,
+            msg: None,
+            ts: 100,
+            seq: 0,
+            dir: None,
+            transcript_path: None,
+            input_tokens: None,
+        };
+        write_session_to(dir.path(), "sess", &session).unwrap();
+
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        let update = crate::transcript::TranscriptUpdate {
+            status: Status::Working,
+            tool: Some("Edit".into()),
+            input_tokens: Some(5000),
+        };
+        app.apply_transcript_update("sess", update);
+
+        assert_eq!(app.sessions["sess"].status, Status::Done);
     }
 }
