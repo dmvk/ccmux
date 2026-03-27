@@ -6,7 +6,7 @@
 // Path encoding: replace every `/` with `-`.
 //
 // Two consumers:
-//   1. Preview panel — read_tail_all() + format_entry() render recent messages.
+//   1. Preview panel — read_tail_all() provides entries for the preview renderer.
 //   2. Status extraction — parse_new_bytes() derives Status/tool/tokens from
 //      assistant messages to update the session registry.
 
@@ -76,15 +76,6 @@ fn shorten_path(path: &str) -> String {
         format!("{}/{}", parts[1], parts[0])
     } else {
         path.to_string()
-    }
-}
-
-/// Format a transcript entry for display in the preview panel.
-pub fn format_entry(entry: &TranscriptEntry) -> String {
-    match entry {
-        TranscriptEntry::User(text) => format!("User: {text}"),
-        TranscriptEntry::Assistant(text) => format!("Assistant: {text}"),
-        TranscriptEntry::Tool(detail) => format!("Tool: {detail}"),
     }
 }
 
@@ -350,24 +341,6 @@ mod tests {
     #[test]
     fn shorten_path_shallow() {
         assert_eq!(shorten_path("d.rs"), "d.rs");
-    }
-
-    #[test]
-    fn format_user_entry() {
-        let entry = TranscriptEntry::User("hello".into());
-        assert_eq!(format_entry(&entry), "User: hello");
-    }
-
-    #[test]
-    fn format_assistant_entry() {
-        let entry = TranscriptEntry::Assistant("thinking...".into());
-        assert_eq!(format_entry(&entry), "Assistant: thinking...");
-    }
-
-    #[test]
-    fn format_tool_entry() {
-        let entry = TranscriptEntry::Tool("Edit src/main.rs".into());
-        assert_eq!(format_entry(&entry), "Tool: Edit src/main.rs");
     }
 
     #[test]
