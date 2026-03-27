@@ -4,10 +4,21 @@
 //   ~/.claude/projects/<encoded-path>/<sessionId>.jsonl
 //
 // Path encoding: replace every `/` with `-`.
+//
+// Two consumers:
+//   1. Preview panel — read_tail_all() + format_entry() render recent messages.
+//   2. Status extraction — parse_new_bytes() derives Status/tool/tokens from
+//      assistant messages to update the session registry.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+
+use serde_json::Value;
+
+use crate::registry::Status;
+
+// ── Preview panel types + helpers ────────────────────────────────────
 
 /// A parsed transcript entry for display in the preview panel.
 #[derive(Debug, Clone, PartialEq)]
@@ -233,9 +244,90 @@ pub fn read_tail_all(path: &std::path::Path, max_entries: usize) -> Vec<Transcri
     entries
 }
 
+// ── Status extraction (used by transcript watcher) ───────────────────
+
+/// Extracted state from a transcript assistant message.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptUpdate {
+    pub status: Status,
+    pub tool: Option<String>,
+    pub input_tokens: Option<u64>,
+}
+
+/// Parse new bytes from a transcript file, returning the latest TranscriptUpdate if any
+/// assistant lines were found. Only the last assistant line's state is returned.
+pub fn parse_new_bytes(bytes: &[u8]) -> Option<TranscriptUpdate> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut last_update: Option<TranscriptUpdate> = None;
+
+    for line in text.lines() {
+        let val: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+
+        let msg = match val.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
+
+        let stop_reason = match msg.get("stop_reason").and_then(|s| s.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let status = match stop_reason {
+            "tool_use" => Status::Working,
+            "end_turn" => Status::Idle,
+            _ => continue,
+        };
+
+        let tool = if status == Status::Working {
+            msg.get("content")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .rev()
+                        .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                        .and_then(|item| item.get("name").and_then(|n| n.as_str()))
+                        .map(String::from)
+                })
+        } else {
+            None
+        };
+
+        let input_tokens = msg.get("usage").map(|usage| {
+            let base = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let cache_create = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cache_read = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            base + cache_create + cache_read
+        });
+
+        last_update = Some(TranscriptUpdate {
+            status,
+            tool,
+            input_tokens,
+        });
+    }
+
+    last_update
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Preview panel tests ──────────────────────────────────────────
 
     #[test]
     fn encode_project_path_replaces_slashes() {
@@ -389,5 +481,79 @@ mod tests {
         assert_eq!(entries.len(), 5);
         assert_eq!(entries[0], TranscriptEntry::User("msg 15".into()));
         assert_eq!(entries[4], TranscriptEntry::User("msg 19".into()));
+    }
+
+    // ── Status extraction tests ──────────────────────────────────────
+
+    #[test]
+    fn parse_tool_use_assistant_line() {
+        let line = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash","id":"x","input":{}}],"usage":{"input_tokens":1000,"cache_creation_input_tokens":5000,"cache_read_input_tokens":2000,"output_tokens":50}}}"#;
+        let update = parse_new_bytes(line.as_bytes()).unwrap();
+        assert_eq!(update.status, Status::Working);
+        assert_eq!(update.tool.as_deref(), Some("Bash"));
+        assert_eq!(update.input_tokens, Some(8000));
+    }
+
+    #[test]
+    fn parse_end_turn_assistant_line() {
+        let line = r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":2000,"cache_creation_input_tokens":0,"cache_read_input_tokens":10000,"output_tokens":100}}}"#;
+        let update = parse_new_bytes(line.as_bytes()).unwrap();
+        assert_eq!(update.status, Status::Idle);
+        assert!(update.tool.is_none());
+        assert_eq!(update.input_tokens, Some(12000));
+    }
+
+    #[test]
+    fn parse_streaming_chunk_ignored_for_status() {
+        let line = r#"{"type":"assistant","message":{"stop_reason":null,"content":[],"usage":{"input_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10}}}"#;
+        let update = parse_new_bytes(line.as_bytes());
+        assert!(update.is_none());
+    }
+
+    #[test]
+    fn parse_non_assistant_lines_ignored() {
+        let lines = b"{\"type\":\"user\",\"message\":{}}\n{\"type\":\"progress\",\"data\":{}}\n";
+        let update = parse_new_bytes(lines);
+        assert!(update.is_none());
+    }
+
+    #[test]
+    fn parse_multiple_lines_returns_last_assistant() {
+        let lines = format!(
+            "{}\n{}\n",
+            r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Read","id":"x","input":{}}],"usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10}}}"#,
+            r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Edit","id":"y","input":{}}],"usage":{"input_tokens":2000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20}}}"#,
+        );
+        let update = parse_new_bytes(lines.as_bytes()).unwrap();
+        assert_eq!(update.tool.as_deref(), Some("Edit"));
+        assert_eq!(update.input_tokens, Some(2000));
+    }
+
+    #[test]
+    fn parse_missing_usage_returns_none_tokens() {
+        let line = r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}}"#;
+        let update = parse_new_bytes(line.as_bytes()).unwrap();
+        assert_eq!(update.status, Status::Idle);
+        assert!(update.input_tokens.is_none());
+    }
+
+    #[test]
+    fn parse_multiple_tool_uses_picks_last() {
+        let line = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Let me check"},{"type":"tool_use","name":"Read","id":"a","input":{}},{"type":"tool_use","name":"Bash","id":"b","input":{}}],"usage":{"input_tokens":3000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":30}}}"#;
+        let update = parse_new_bytes(line.as_bytes()).unwrap();
+        assert_eq!(update.tool.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn parse_empty_bytes() {
+        assert!(parse_new_bytes(b"").is_none());
+    }
+
+    #[test]
+    fn parse_malformed_json_skipped() {
+        let lines = b"not json\n{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[],\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":5}}}\n";
+        let update = parse_new_bytes(lines).unwrap();
+        assert_eq!(update.status, Status::Idle);
+        assert_eq!(update.input_tokens, Some(100));
     }
 }
