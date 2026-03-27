@@ -353,8 +353,17 @@ impl App {
             if session.status == Status::Done {
                 return;
             }
+            // Only update tool/desc when the message contains a tool_use block.
+            // Intermediate text-only messages (stop_reason: null, no tool) should
+            // not blank out the last known tool — avoids card flickering.
+            if update.tool.is_some() {
+                session.tool = update.tool;
+                session.desc = update.desc;
+            } else if update.status == Status::Idle {
+                session.tool = None;
+                session.desc = None;
+            }
             session.status = update.status;
-            session.tool = update.tool;
             if update.input_tokens.is_some() {
                 session.input_tokens = update.input_tokens;
             }
@@ -1333,6 +1342,7 @@ mod tests {
         let update = crate::transcript::TranscriptUpdate {
             status: Status::Working,
             tool: Some("Bash".into()),
+            desc: Some("cargo test".into()),
             input_tokens: Some(34000),
         };
         app.apply_transcript_update("sess", update);
@@ -1340,6 +1350,7 @@ mod tests {
         let s = &app.sessions["sess"];
         assert_eq!(s.status, Status::Working);
         assert_eq!(s.tool.as_deref(), Some("Bash"));
+        assert_eq!(s.desc.as_deref(), Some("cargo test"));
         assert_eq!(s.input_tokens, Some(34000));
     }
 
@@ -1364,6 +1375,7 @@ mod tests {
         let update = crate::transcript::TranscriptUpdate {
             status: Status::Working,
             tool: Some("Edit".into()),
+            desc: Some("main.rs".into()),
             input_tokens: Some(5000),
         };
         app.apply_transcript_update("sess", update);

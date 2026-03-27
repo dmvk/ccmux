@@ -228,6 +228,7 @@ pub fn read_tail_all(path: &std::path::Path, max_entries: usize) -> Vec<Transcri
 pub struct TranscriptUpdate {
     pub status: Status,
     pub tool: Option<String>,
+    pub desc: Option<String>,
     pub input_tokens: Option<u64>,
 }
 
@@ -252,30 +253,31 @@ pub fn parse_new_bytes(bytes: &[u8]) -> Option<TranscriptUpdate> {
             None => continue,
         };
 
-        let stop_reason = match msg.get("stop_reason").and_then(|s| s.as_str()) {
-            Some(s) => s,
-            None => continue,
-        };
+        // stop_reason: "tool_use" → Working, "end_turn" → Idle, null → Working
+        // (null means streaming/intermediate — Claude is actively generating)
+        let stop_reason = msg.get("stop_reason").and_then(|s| s.as_str());
 
         let status = match stop_reason {
-            "tool_use" => Status::Working,
-            "end_turn" => Status::Idle,
+            Some("end_turn") => Status::Idle,
+            Some("tool_use") | None => Status::Working,
             _ => continue,
         };
 
-        let tool = if status == Status::Working {
-            msg.get("content")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .rev()
-                        .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                        .and_then(|item| item.get("name").and_then(|n| n.as_str()))
-                        .map(String::from)
-                })
-        } else {
-            None
-        };
+        // Extract tool info from content — for both tool_use stop_reason and
+        // intermediate (null) messages that may contain tool_use blocks
+        let found_tool = msg.get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .rev()
+                    .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+            });
+        let tool = found_tool.and_then(|item| item.get("name").and_then(|n| n.as_str())).map(String::from);
+        let desc = found_tool.and_then(|item| {
+            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let summary = summarize_tool_input(name, item.get("input"));
+            if summary.is_empty() { None } else { Some(summary) }
+        });
 
         let input_tokens = msg.get("usage").map(|usage| {
             let base = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -293,6 +295,7 @@ pub fn parse_new_bytes(bytes: &[u8]) -> Option<TranscriptUpdate> {
         last_update = Some(TranscriptUpdate {
             status,
             tool,
+            desc,
             input_tokens,
         });
     }
@@ -455,7 +458,24 @@ mod tests {
         let update = parse_new_bytes(line.as_bytes()).unwrap();
         assert_eq!(update.status, Status::Working);
         assert_eq!(update.tool.as_deref(), Some("Bash"));
+        assert!(update.desc.is_none()); // empty input → no desc
         assert_eq!(update.input_tokens, Some(8000));
+    }
+
+    #[test]
+    fn parse_tool_use_extracts_desc() {
+        let line = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash","id":"x","input":{"command":"cargo test"}}],"usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":50}}}"#;
+        let update = parse_new_bytes(line.as_bytes()).unwrap();
+        assert_eq!(update.tool.as_deref(), Some("Bash"));
+        assert_eq!(update.desc.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn parse_edit_tool_extracts_file_path_desc() {
+        let line = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Edit","id":"x","input":{"file_path":"/a/b/src/main.rs"}}],"usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":50}}}"#;
+        let update = parse_new_bytes(line.as_bytes()).unwrap();
+        assert_eq!(update.tool.as_deref(), Some("Edit"));
+        assert_eq!(update.desc.as_deref(), Some("src/main.rs"));
     }
 
     #[test]
@@ -468,10 +488,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_streaming_chunk_ignored_for_status() {
+    fn parse_streaming_chunk_is_working() {
+        // Intermediate messages (stop_reason: null) mean Claude is actively generating
         let line = r#"{"type":"assistant","message":{"stop_reason":null,"content":[],"usage":{"input_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10}}}"#;
-        let update = parse_new_bytes(line.as_bytes());
-        assert!(update.is_none());
+        let update = parse_new_bytes(line.as_bytes()).unwrap();
+        assert_eq!(update.status, Status::Working);
+        assert!(update.tool.is_none()); // no tool_use block in this intermediate msg
+        assert_eq!(update.input_tokens, Some(500));
+    }
+
+    #[test]
+    fn parse_streaming_chunk_with_tool_extracts_it() {
+        // Intermediate message with tool_use block but stop_reason: null
+        let line = r#"{"type":"assistant","message":{"stop_reason":null,"content":[{"type":"tool_use","name":"Grep","id":"x","input":{"pattern":"Session"}}],"usage":{"input_tokens":800,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20}}}"#;
+        let update = parse_new_bytes(line.as_bytes()).unwrap();
+        assert_eq!(update.status, Status::Working);
+        assert_eq!(update.tool.as_deref(), Some("Grep"));
+        assert_eq!(update.desc.as_deref(), Some("/Session/"));
     }
 
     #[test]
