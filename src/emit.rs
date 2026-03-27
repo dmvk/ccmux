@@ -14,7 +14,6 @@ fn parse_status(s: &str) -> Result<Status> {
     match s {
         "starting" => Ok(Status::Starting),
         "working" => Ok(Status::Working),
-        "waiting" => Ok(Status::Waiting),
         "idle" => Ok(Status::Idle),
         "done" => Ok(Status::Done),
         _ => bail!("unknown status: {s}"),
@@ -148,8 +147,8 @@ pub fn emit_to(
         None
     };
 
-    // msg: only populated when waiting
-    let msg = if status == Status::Waiting {
+    // msg: only populated when idle
+    let msg = if status == Status::Idle {
         payload.message
     } else {
         None
@@ -162,6 +161,10 @@ pub fn emit_to(
         existing.as_ref().and_then(|s| s.session_id.clone())
     };
 
+    // Carry forward transcript_path and input_tokens from existing session
+    let transcript_path = existing.as_ref().and_then(|s| s.transcript_path.clone());
+    let input_tokens = existing.as_ref().and_then(|s| s.input_tokens);
+
     let session = Session {
         status,
         tool,
@@ -171,6 +174,8 @@ pub fn emit_to(
         seq,
         dir,
         session_id,
+        transcript_path,
+        input_tokens,
     };
 
     registry::write_session_to(registry_dir, session_name, &session)?;
@@ -265,7 +270,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         emit_to(dir.path(), "alpha", "working", r#"{"tool_name":"Edit"}"#).unwrap();
-        emit_to(dir.path(), "beta", "waiting", r#"{"message":"Approve?"}"#).unwrap();
+        emit_to(dir.path(), "beta", "idle", r#"{"message":"Approve?"}"#).unwrap();
         emit_to(dir.path(), "gamma", "done", "{}").unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
@@ -274,13 +279,13 @@ mod tests {
         // Check column assignments
         use crate::dashboard::Column;
         let working = app.sessions_in_column(Column::Working);
-        let waiting = app.sessions_in_column(Column::Waiting);
+        let needs_attention = app.sessions_in_column(Column::NeedsAttention);
         let done = app.sessions_in_column(Column::Done);
 
         assert_eq!(working.len(), 1);
         assert_eq!(working[0].0, "alpha");
-        assert_eq!(waiting.len(), 1);
-        assert_eq!(waiting[0].0, "beta");
+        assert_eq!(needs_attention.len(), 1);
+        assert_eq!(needs_attention[0].0, "beta");
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].0, "gamma");
     }
@@ -289,7 +294,7 @@ mod tests {
     fn session_lifecycle_updates_dashboard() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Start → Working → Waiting → Idle → Done
+        // Start → Working → Idle → Done
         emit_to(dir.path(), "s1", "starting", r#"{"cwd":"/proj"}"#).unwrap();
         let app = App::with_registry_dir(dir.path()).unwrap();
         assert_eq!(app.sessions["s1"].status, Status::Starting);
@@ -299,14 +304,10 @@ mod tests {
         assert_eq!(app.sessions["s1"].status, Status::Working);
         assert_eq!(app.sessions["s1"].tool.as_deref(), Some("Bash"));
 
-        emit_to(dir.path(), "s1", "waiting", r#"{"message":"Continue?"}"#).unwrap();
-        let app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.sessions["s1"].status, Status::Waiting);
-        assert_eq!(app.sessions["s1"].msg.as_deref(), Some("Continue?"));
-
-        emit_to(dir.path(), "s1", "idle", "{}").unwrap();
+        emit_to(dir.path(), "s1", "idle", r#"{"message":"Continue?"}"#).unwrap();
         let app = App::with_registry_dir(dir.path()).unwrap();
         assert_eq!(app.sessions["s1"].status, Status::Idle);
+        assert_eq!(app.sessions["s1"].msg.as_deref(), Some("Continue?"));
 
         emit_to(dir.path(), "s1", "done", "{}").unwrap();
         let app = App::with_registry_dir(dir.path()).unwrap();
@@ -321,7 +322,6 @@ mod tests {
     fn parse_status_valid() {
         assert_eq!(parse_status("starting").unwrap(), Status::Starting);
         assert_eq!(parse_status("working").unwrap(), Status::Working);
-        assert_eq!(parse_status("waiting").unwrap(), Status::Waiting);
         assert_eq!(parse_status("idle").unwrap(), Status::Idle);
         assert_eq!(parse_status("done").unwrap(), Status::Done);
     }
@@ -460,7 +460,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let json = r#"{"tool_name":"Bash","tool_input":{"description":"Install deps"}}"#;
         emit_to(dir.path(), "s1", "working", json).unwrap();
-        emit_to(dir.path(), "s1", "waiting", r#"{"message":"Continue?"}"#).unwrap();
+        emit_to(dir.path(), "s1", "idle", r#"{"message":"Continue?"}"#).unwrap();
 
         let session = registry::read_session_from(dir.path(), "s1")
             .unwrap()

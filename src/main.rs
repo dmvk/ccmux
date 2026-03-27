@@ -83,7 +83,6 @@ fn main() -> anyhow::Result<()> {
                 let status = match s.status {
                     registry::Status::Starting => "starting",
                     registry::Status::Working => "working",
-                    registry::Status::Waiting => "waiting",
                     registry::Status::Idle => "idle",
                     registry::Status::Done => "done",
                 };

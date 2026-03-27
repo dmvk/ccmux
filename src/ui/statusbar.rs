@@ -78,7 +78,6 @@ fn status_label(status: &Status) -> &'static str {
     match status {
         Status::Starting => "starting",
         Status::Working => "working",
-        Status::Waiting => "waiting",
         Status::Idle => "idle",
         Status::Done => "done",
     }
@@ -108,6 +107,8 @@ mod tests {
             seq: 1,
             dir: Some("~/speedbets/trading".to_string()),
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         }
     }
 
@@ -146,7 +147,7 @@ mod tests {
     #[test]
     fn render_selected_session_info() {
         let dir = tempfile::tempdir().unwrap();
-        let session = make_session(Status::Waiting, 100);
+        let session = make_session(Status::Idle, 100);
         write_session_to(dir.path(), "trading", &session).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
@@ -157,7 +158,7 @@ mod tests {
         let text = buffer_text(&buf);
         assert!(text.contains("session:"), "session label present");
         assert!(text.contains("trading"), "session name present");
-        assert!(text.contains("waiting"), "status label present");
+        assert!(text.contains("idle"), "status label present");
         assert!(text.contains("~/speedbets/trading"), "dir present");
     }
 
@@ -185,8 +186,8 @@ mod tests {
         let session = make_session(Status::Idle, 100);
         write_session_to(dir.path(), "docs", &session).unwrap();
 
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-        app.selected_column = 2; // Idle column
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        // Idle maps to NeedsAttention (index 0), which is initial focus
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
         render_statusbar(&app, area, &mut buf);
@@ -199,7 +200,7 @@ mod tests {
     #[test]
     fn render_narrow_area_truncates() {
         let dir = tempfile::tempdir().unwrap();
-        let session = make_session(Status::Waiting, 100);
+        let session = make_session(Status::Idle, 100);
         write_session_to(dir.path(), "trading", &session).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
@@ -213,7 +214,6 @@ mod tests {
     fn status_label_all_variants() {
         assert_eq!(status_label(&Status::Starting), "starting");
         assert_eq!(status_label(&Status::Working), "working");
-        assert_eq!(status_label(&Status::Waiting), "waiting");
         assert_eq!(status_label(&Status::Idle), "idle");
         assert_eq!(status_label(&Status::Done), "done");
     }
@@ -243,8 +243,8 @@ mod tests {
         session.dir = None;
         write_session_to(dir.path(), "nodirtest", &session).unwrap();
 
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-        app.selected_column = 2; // Idle column
+        let app = App::with_registry_dir(dir.path()).unwrap();
+        // Idle maps to NeedsAttention (index 0), which is initial focus
         let area = Rect::new(0, 0, 80, 2);
         let mut buf = Buffer::empty(area);
         render_statusbar(&app, area, &mut buf);

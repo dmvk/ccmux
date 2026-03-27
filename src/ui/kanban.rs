@@ -149,7 +149,7 @@ fn render_column(
                         );
                     }
                 }
-                Status::Waiting => {
+                Status::Idle => {
                     if let Some(ref msg) = session.msg {
                         buf.set_string(
                             lx,
@@ -201,9 +201,8 @@ fn render_column_separator(area: Rect, buf: &mut Buffer, header_sep_y: u16) {
 /// Column header style — matches the column's status colour from PRD §8.
 fn header_style(col: &Column) -> Style {
     match col {
-        Column::Waiting => Style::default().fg(Color::Yellow),
+        Column::NeedsAttention => Style::default().fg(Color::Yellow),
         Column::Working => Style::default().fg(Color::Blue),
-        Column::Idle => Style::default().fg(Color::DarkGray),
         Column::Done => Style::default().fg(Color::Green),
     }
 }
@@ -253,6 +252,8 @@ mod tests {
             seq: 1,
             dir: Some("~/project".to_string()),
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         }
     }
 
@@ -279,9 +280,9 @@ mod tests {
     }
 
     #[test]
-    fn render_single_waiting_session() {
+    fn render_single_idle_session() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = make_session(Status::Waiting, 950);
+        let mut session = make_session(Status::Idle, 950);
         session.msg = Some("Should I proceed?".to_string());
         write_session_to(dir.path(), "trading", &session).unwrap();
 
@@ -291,7 +292,7 @@ mod tests {
         render_kanban(&app, area, &mut buf, 1000);
 
         let text = buffer_text(&buf);
-        assert!(text.contains("NEEDS INPUT"), "header present");
+        assert!(text.contains("NEEDS ATTENTION"), "header present");
         assert!(text.contains("trading"), "session name present");
         assert!(text.contains("50s"), "age present");
         assert!(text.contains("Should I proceed?"), "message present");
@@ -301,7 +302,7 @@ mod tests {
     #[test]
     fn render_multiple_columns() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s1 = make_session(Status::Waiting, 950);
+        let mut s1 = make_session(Status::Idle, 950);
         s1.msg = Some("Proceed?".to_string());
         write_session_to(dir.path(), "alpha", &s1).unwrap();
 
@@ -315,9 +316,9 @@ mod tests {
         render_kanban(&app, area, &mut buf, 1000);
 
         let text = buffer_text(&buf);
-        assert!(text.contains("NEEDS INPUT"), "waiting header");
+        assert!(text.contains("NEEDS ATTENTION"), "needs attention header");
         assert!(text.contains("WORKING"), "working header");
-        assert!(text.contains("alpha"), "waiting session");
+        assert!(text.contains("alpha"), "idle session");
         assert!(text.contains("beta"), "working session");
         assert!(text.contains("Edit"), "tool name");
     }
@@ -337,7 +338,7 @@ mod tests {
     #[test]
     fn render_selected_card_has_content() {
         let dir = tempfile::tempdir().unwrap();
-        let session = make_session(Status::Waiting, 950);
+        let session = make_session(Status::Idle, 950);
         write_session_to(dir.path(), "selected", &session).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
@@ -429,8 +430,8 @@ mod tests {
     #[test]
     fn render_dot_separator_between_cards() {
         let dir = tempfile::tempdir().unwrap();
-        let s1 = make_session(Status::Waiting, 900);
-        let s2 = make_session(Status::Waiting, 950);
+        let s1 = make_session(Status::Idle, 900);
+        let s2 = make_session(Status::Idle, 950);
         write_session_to(dir.path(), "aaa", &s1).unwrap();
         write_session_to(dir.path(), "bbb", &s2).unwrap();
 

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 pub enum Status {
     Starting,
     Working,
-    Waiting,
+    #[serde(alias = "waiting")]
     Idle,
     Done,
 }
@@ -25,6 +25,10 @@ pub struct Session {
     pub dir: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub transcript_path: Option<String>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
 }
 
 /// Returns the registry directory: `~/.ccmux/`
@@ -206,6 +210,8 @@ mod tests {
             seq: 42,
             dir: Some("~/project".into()),
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         let json = serde_json::to_string(&session).unwrap();
         let deserialized: Session = serde_json::from_str(&json).unwrap();
@@ -226,6 +232,8 @@ mod tests {
             seq: 5,
             dir: Some("/home/user/project".into()),
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         write_session_to(dir.path(), "test", &session).unwrap();
         let read_back = read_session_from(dir.path(), "test").unwrap().unwrap();
@@ -276,9 +284,11 @@ mod tests {
             seq: 1,
             dir: Some("/project".into()),
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         let s2 = Session {
-            status: Status::Waiting,
+            status: Status::Idle,
             tool: None,
             desc: None,
             msg: Some("confirm?".into()),
@@ -286,6 +296,8 @@ mod tests {
             seq: 3,
             dir: Some("/other".into()),
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         write_session_to(dir.path(), "alpha", &s1).unwrap();
         write_session_to(dir.path(), "beta", &s2).unwrap();
@@ -295,7 +307,7 @@ mod tests {
         assert_eq!(sessions[0].0, "alpha");
         assert_eq!(sessions[1].0, "beta");
         assert_eq!(sessions[0].1.status, Status::Working);
-        assert_eq!(sessions[1].1.status, Status::Waiting);
+        assert_eq!(sessions[1].1.status, Status::Idle);
     }
 
     #[test]
@@ -310,6 +322,8 @@ mod tests {
             seq: 0,
             dir: None,
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         write_session_to(dir.path(), "good", &s1).unwrap();
         std::fs::write(dir.path().join("bad.json"), "not json").unwrap();
@@ -331,6 +345,8 @@ mod tests {
             seq: 0,
             dir: None,
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         write_session_to(dir.path(), "real", &s1).unwrap();
         std::fs::write(dir.path().join("readme.txt"), "ignore me").unwrap();
@@ -352,6 +368,8 @@ mod tests {
             seq: 0,
             dir: None,
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         write_session_to(dir.path(), "sess", &s1).unwrap();
         // Simulate a leftover temp file
@@ -374,6 +392,8 @@ mod tests {
             seq: 0,
             dir: None,
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         write_session_to(dir.path(), "clean", &session).unwrap();
         // The temp file should be gone after rename
@@ -394,6 +414,8 @@ mod tests {
             seq: 0,
             dir: None,
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         write_session_to(dir.path(), "doomed", &session).unwrap();
         assert!(dir.path().join("doomed.json").exists());
@@ -420,6 +442,8 @@ mod tests {
             seq: 1,
             dir: Some("/project".into()),
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         };
         let json = serde_json::to_string(&session).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
@@ -432,5 +456,35 @@ mod tests {
         let session: Session = serde_json::from_str(json).unwrap();
         assert_eq!(session.desc, None);
         assert_eq!(session.tool.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn session_with_transcript_fields_roundtrip() {
+        let session = Session {
+            status: Status::Working,
+            tool: Some("Edit".into()),
+            desc: None,
+            msg: None,
+            ts: 1711234567,
+            seq: 42,
+            dir: Some("~/project".into()),
+            session_id: None,
+            transcript_path: Some("/Users/bob/.claude/projects/foo/abc.jsonl".into()),
+            input_tokens: Some(34000),
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let deserialized: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.transcript_path.as_deref(), Some("/Users/bob/.claude/projects/foo/abc.jsonl"));
+        assert_eq!(deserialized.input_tokens, Some(34000));
+    }
+
+    #[test]
+    fn session_without_new_fields_deserializes() {
+        // Old registry files without transcript_path/input_tokens/desc/session_id still parse
+        let json = r#"{"status":"working","tool":"Bash","msg":null,"ts":100,"seq":1,"dir":"/tmp"}"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.status, Status::Working);
+        assert!(session.transcript_path.is_none());
+        assert!(session.input_tokens.is_none());
     }
 }

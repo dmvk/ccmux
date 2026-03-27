@@ -13,14 +13,13 @@ use ratatui::Terminal;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Kanban columns displayed in the dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Column {
-    Waiting,
+    NeedsAttention,
     Working,
-    Idle,
     Done,
 }
 
@@ -34,21 +33,15 @@ pub enum InputMode {
 }
 
 /// Column display order (left to right).
-pub const COLUMN_ORDER: [Column; 4] =
-    [Column::Waiting, Column::Working, Column::Idle, Column::Done];
-
-/// Debounce duration for Notification → waiting transitions per PRD §8.
-/// If a PreToolUse event arrives within this window, the session stays
-/// visually in `working` and never flashes yellow.
-const DEBOUNCE_DURATION: Duration = Duration::from_secs(5);
+pub const COLUMN_ORDER: [Column; 3] =
+    [Column::NeedsAttention, Column::Working, Column::Done];
 
 impl Column {
     /// Column header title.
     pub fn title(self) -> &'static str {
         match self {
-            Column::Waiting => "NEEDS INPUT",
+            Column::NeedsAttention => "NEEDS ATTENTION",
             Column::Working => "WORKING",
-            Column::Idle => "IDLE",
             Column::Done => "DONE",
         }
     }
@@ -56,9 +49,8 @@ impl Column {
     /// Map a session status to its kanban column.
     pub fn from_status(status: &Status) -> Column {
         match status {
-            Status::Waiting => Column::Waiting,
+            Status::Idle => Column::NeedsAttention,
             Status::Starting | Status::Working => Column::Working,
-            Status::Idle => Column::Idle,
             Status::Done => Column::Done,
         }
     }
@@ -80,8 +72,6 @@ pub struct App {
     registry_dir: PathBuf,
     /// Whether the app should quit.
     pub should_quit: bool,
-    /// Debounce timers: session name -> time the waiting event arrived.
-    pub debounce_timers: HashMap<String, Instant>,
     /// Current input mode (normal navigation vs. modal input).
     pub input_mode: InputMode,
     /// Text buffer for the session name field in the new-session modal.
@@ -134,7 +124,6 @@ impl App {
             _watcher: watcher,
             registry_dir: dir.to_path_buf(),
             should_quit: false,
-            debounce_timers: HashMap::new(),
             input_mode: InputMode::Normal,
             modal_name: String::new(),
             modal_dir: String::new(),
@@ -153,19 +142,6 @@ impl App {
         Ok(app)
     }
 
-    /// Returns the effective display column for a session, considering debounce.
-    /// During the debounce window, a session that is `Waiting` in the file
-    /// is shown in the `Working` column to prevent false "needs input" flashes.
-    fn effective_column(&self, name: &str, session: &Session) -> Column {
-        if session.status == Status::Waiting
-            && let Some(timer_start) = self.debounce_timers.get(name)
-            && timer_start.elapsed() < DEBOUNCE_DURATION
-        {
-            return Column::Working;
-        }
-        Column::from_status(&session.status)
-    }
-
     /// Returns all columns in display order.
     pub fn visible_columns(&self) -> Vec<Column> {
         COLUMN_ORDER.to_vec()
@@ -176,7 +152,7 @@ impl App {
         let mut entries: Vec<_> = self
             .sessions
             .iter()
-            .filter(|(name, s)| self.effective_column(name, s) == col)
+            .filter(|(_, s)| Column::from_status(&s.status) == col)
             .map(|(name, session)| (name.as_str(), session))
             .collect();
         entries.sort_by_key(|(_, s)| s.ts);
@@ -184,42 +160,13 @@ impl App {
     }
 
     /// Drain file watcher events and reload sessions if anything changed.
-    /// Manages debounce timers: starts a timer when a session transitions
-    /// to `waiting`, cancels it if the session leaves `waiting` within the window.
     pub fn process_watcher_events(&mut self) {
         let mut changed = false;
         while self.watcher_rx.try_recv().is_ok() {
             changed = true;
         }
         if changed {
-            // Snapshot which sessions were already waiting before reload
-            let previously_waiting: Vec<String> = self
-                .sessions
-                .iter()
-                .filter(|(_, s)| s.status == Status::Waiting)
-                .map(|(name, _)| name.clone())
-                .collect();
-
             self.sessions = load_sessions_from(&self.registry_dir);
-
-            // Manage debounce timers for waiting transitions
-            for (name, session) in &self.sessions {
-                if session.status == Status::Waiting {
-                    // Start debounce only for newly-waiting sessions
-                    if !previously_waiting.contains(name)
-                        && !self.debounce_timers.contains_key(name)
-                    {
-                        self.debounce_timers.insert(name.clone(), Instant::now());
-                    }
-                } else {
-                    // No longer waiting → cancel debounce
-                    self.debounce_timers.remove(name);
-                }
-            }
-
-            // Clean up timers for removed sessions
-            self.debounce_timers
-                .retain(|name, _| self.sessions.contains_key(name));
 
             self.clamp_selections();
 
@@ -233,7 +180,7 @@ impl App {
                 let col = self
                     .sessions
                     .get(&focus_name)
-                    .map(|s| self.effective_column(&focus_name, s))
+                    .map(|s| Column::from_status(&s.status))
                     .unwrap_or(Column::Working);
                 let visible = self.visible_columns();
                 if let Some(col_idx) = visible.iter().position(|c| *c == col) {
@@ -267,12 +214,12 @@ impl App {
         }
     }
 
-    /// Set initial column focus: prefer Waiting (if non-empty), then first non-empty column.
+    /// Set initial column focus: prefer NeedsAttention (if non-empty), then first non-empty column.
     fn focus_initial_column(&mut self) {
         let visible = self.visible_columns();
         if let Some(idx) = visible
             .iter()
-            .position(|c| *c == Column::Waiting && !self.sessions_in_column(*c).is_empty())
+            .position(|c| *c == Column::NeedsAttention && !self.sessions_in_column(*c).is_empty())
         {
             self.selected_column = idx;
         } else if let Some(idx) = visible
@@ -351,40 +298,14 @@ impl App {
         }
     }
 
-    /// Process debounce timers: remove expired timers and return session names
-    /// that have completed the debounce period and are now truly `waiting`.
-    /// The caller should trigger auto-focus for these sessions.
-    pub fn process_debounce_timers(&mut self) -> Vec<String> {
-        let mut newly_waiting = Vec::new();
-        self.debounce_timers.retain(|name, timer_start| {
-            if timer_start.elapsed() >= DEBOUNCE_DURATION {
-                // Timer expired — session has been waiting long enough
-                if let Some(session) = self.sessions.get(name)
-                    && session.status == Status::Waiting
-                {
-                    newly_waiting.push(name.clone());
-                }
-                false // remove expired timer
-            } else {
-                true // keep active timer
-            }
-        });
-        // Column assignments may have changed, re-clamp
-        if !newly_waiting.is_empty() {
-            self.clamp_selections();
-        }
-        newly_waiting
-    }
-
-    /// Auto-focus: jump selection to the Waiting column and the given session.
-    /// Called when a session completes its debounce and is now truly `waiting`.
+    /// Auto-focus: jump selection to the NeedsAttention column and the given session.
     pub fn auto_focus_session(&mut self, name: &str) {
         let visible = self.visible_columns();
-        if let Some(idx) = visible.iter().position(|c| *c == Column::Waiting) {
+        if let Some(idx) = visible.iter().position(|c| *c == Column::NeedsAttention) {
             self.selected_column = idx;
-            let entries = self.sessions_in_column(Column::Waiting);
+            let entries = self.sessions_in_column(Column::NeedsAttention);
             if let Some(row) = entries.iter().position(|(n, _)| *n == name) {
-                self.selected_rows.insert(Column::Waiting, row);
+                self.selected_rows.insert(Column::NeedsAttention, row);
             }
         }
     }
@@ -634,12 +555,6 @@ fn run_loop(
         // Drain file watcher events and reload sessions
         app.process_watcher_events();
 
-        // Process debounce timers and auto-focus newly waiting sessions
-        let newly_waiting = app.process_debounce_timers();
-        if let Some(name) = newly_waiting.last() {
-            app.auto_focus_session(name);
-        }
-
         // Refresh preview transcript on each tick
         if app.input_mode == InputMode::Preview {
             app.refresh_preview();
@@ -650,12 +565,11 @@ fn run_loop(
 }
 
 /// Return the status icon for a session per PRD §8.
-/// `?` waiting, `●` working/starting, `○` idle, `✓` done.
+/// `?` idle, `●` working/starting, `✓` done.
 pub fn status_icon(status: &Status) -> &'static str {
     match status {
-        Status::Waiting => "?",
+        Status::Idle => "?",
         Status::Starting | Status::Working => "●",
-        Status::Idle => "○",
         Status::Done => "✓",
     }
 }
@@ -676,9 +590,8 @@ pub fn format_age(ts: u64, now: u64) -> String {
 /// Return the style for a status icon per PRD §8 colour scheme.
 pub fn status_style(status: &Status) -> Style {
     match status {
-        Status::Waiting => Style::default().fg(Color::Yellow),
+        Status::Idle => Style::default().fg(Color::Yellow),
         Status::Starting | Status::Working => Style::default().fg(Color::Blue),
-        Status::Idle => Style::default().fg(Color::DarkGray),
         Status::Done => Style::default().fg(Color::Green),
     }
 }
@@ -701,7 +614,7 @@ pub fn dir_style() -> Style {
 /// Style for a session's message text, varying by status.
 pub fn msg_style(status: &Status) -> Style {
     match status {
-        Status::Waiting => Style::default().fg(Color::Yellow),
+        Status::Idle => Style::default().fg(Color::Yellow),
         _ => Style::default().fg(Color::Gray),
     }
 }
@@ -734,23 +647,23 @@ mod tests {
             seq: 0,
             dir: None,
             session_id: None,
+            transcript_path: None,
+            input_tokens: None,
         }
     }
 
     #[test]
     fn column_from_status_mapping() {
-        assert_eq!(Column::from_status(&Status::Waiting), Column::Waiting);
+        assert_eq!(Column::from_status(&Status::Idle), Column::NeedsAttention);
         assert_eq!(Column::from_status(&Status::Working), Column::Working);
         assert_eq!(Column::from_status(&Status::Starting), Column::Working);
-        assert_eq!(Column::from_status(&Status::Idle), Column::Idle);
         assert_eq!(Column::from_status(&Status::Done), Column::Done);
     }
 
     #[test]
     fn column_titles() {
-        assert_eq!(Column::Waiting.title(), "NEEDS INPUT");
+        assert_eq!(Column::NeedsAttention.title(), "NEEDS ATTENTION");
         assert_eq!(Column::Working.title(), "WORKING");
-        assert_eq!(Column::Idle.title(), "IDLE");
         assert_eq!(Column::Done.title(), "DONE");
     }
 
@@ -758,48 +671,46 @@ mod tests {
     fn empty_app_shows_all_columns() {
         let dir = tempfile::tempdir().unwrap();
         let app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.visible_columns().len(), 4);
-        assert_eq!(app.current_column(), Some(Column::Waiting));
+        assert_eq!(app.visible_columns().len(), 3);
+        assert_eq!(app.current_column(), Some(Column::NeedsAttention));
         assert!(app.selected_session().is_none());
     }
 
     #[test]
     fn sessions_grouped_into_correct_columns() {
         let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Idle, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
-        write_session_to(dir.path(), "c", &make_session(Status::Idle, 300)).unwrap();
         write_session_to(dir.path(), "d", &make_session(Status::Done, 400)).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
 
-        assert_eq!(app.sessions_in_column(Column::Waiting).len(), 1);
+        assert_eq!(app.sessions_in_column(Column::NeedsAttention).len(), 1);
         assert_eq!(app.sessions_in_column(Column::Working).len(), 1);
-        assert_eq!(app.sessions_in_column(Column::Idle).len(), 1);
         assert_eq!(app.sessions_in_column(Column::Done).len(), 1);
     }
 
     #[test]
     fn visible_columns_always_shows_all() {
         let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Idle, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Done, 200)).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
         assert_eq!(
             app.visible_columns(),
-            vec![Column::Waiting, Column::Working, Column::Idle, Column::Done]
+            vec![Column::NeedsAttention, Column::Working, Column::Done]
         );
     }
 
     #[test]
-    fn initial_focus_prefers_waiting_column() {
+    fn initial_focus_prefers_needs_attention_column() {
         let dir = tempfile::tempdir().unwrap();
         write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
-        write_session_to(dir.path(), "b", &make_session(Status::Waiting, 200)).unwrap();
+        write_session_to(dir.path(), "b", &make_session(Status::Idle, 200)).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.current_column(), Some(Column::Waiting));
+        assert_eq!(app.current_column(), Some(Column::NeedsAttention));
     }
 
     #[test]
@@ -808,7 +719,7 @@ mod tests {
         write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        // No Waiting sessions, so falls back to first occupied column (Working)
+        // No NeedsAttention sessions, so falls back to first occupied column (Working)
         assert_eq!(app.current_column(), Some(Column::Working));
     }
 
@@ -831,7 +742,7 @@ mod tests {
     #[test]
     fn selected_session_returns_first_in_focused_column() {
         let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "sess", &make_session(Status::Idle, 100)).unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
         assert_eq!(app.selected_session(), Some("sess"));
@@ -927,12 +838,12 @@ mod tests {
     #[test]
     fn move_right_advances_column() {
         let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Idle, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
-        // Initial focus is Waiting (index 0)
-        assert_eq!(app.current_column(), Some(Column::Waiting));
+        // Initial focus is NeedsAttention (index 0)
+        assert_eq!(app.current_column(), Some(Column::NeedsAttention));
         app.move_right();
         assert_eq!(app.current_column(), Some(Column::Working));
     }
@@ -940,55 +851,55 @@ mod tests {
     #[test]
     fn move_right_clamps_at_last_occupied_column() {
         let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Idle, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
         app.selected_column = 1; // Working (last occupied column)
-        app.move_right(); // should stay — no sessions in Idle or Done
+        app.move_right(); // should stay — no sessions in Done
         assert_eq!(app.current_column(), Some(Column::Working));
     }
 
     #[test]
     fn move_left_retreats_column() {
         let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Idle, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Working, 200)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
         app.selected_column = 1; // Working
         assert_eq!(app.current_column(), Some(Column::Working));
         app.move_left();
-        assert_eq!(app.current_column(), Some(Column::Waiting));
+        assert_eq!(app.current_column(), Some(Column::NeedsAttention));
     }
 
     #[test]
     fn move_left_clamps_at_first_column() {
         let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Idle, 100)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
         app.move_left(); // already at 0
-        assert_eq!(app.current_column(), Some(Column::Waiting));
+        assert_eq!(app.current_column(), Some(Column::NeedsAttention));
     }
 
     #[test]
     fn navigation_skips_empty_columns() {
         let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "a", &make_session(Status::Waiting, 100)).unwrap();
+        write_session_to(dir.path(), "a", &make_session(Status::Idle, 100)).unwrap();
         write_session_to(dir.path(), "b", &make_session(Status::Done, 200)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.current_column(), Some(Column::Waiting));
+        assert_eq!(app.current_column(), Some(Column::NeedsAttention));
         app.move_right();
-        // Skips Working and Idle (empty), jumps to Done
+        // Skips Working (empty), jumps to Done
         assert_eq!(app.current_column(), Some(Column::Done));
         app.move_right();
         // Already at last occupied column
         assert_eq!(app.current_column(), Some(Column::Done));
         app.move_left();
-        // Back to Waiting, skipping empty columns
-        assert_eq!(app.current_column(), Some(Column::Waiting));
+        // Back to NeedsAttention, skipping empty columns
+        assert_eq!(app.current_column(), Some(Column::NeedsAttention));
     }
 
     #[test]
@@ -1024,142 +935,12 @@ mod tests {
         assert_eq!(app.selected_rows.get(&Column::Working).copied(), Some(0));
     }
 
-    // --- Debounce tests ---
-
     #[test]
-    fn initial_waiting_sessions_not_debounced() {
-        let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
-
-        let app = App::with_registry_dir(dir.path()).unwrap();
-        // No debounce timer for sessions loaded at startup
-        assert!(!app.debounce_timers.contains_key("sess"));
-        // Should appear directly in Waiting column
-        assert_eq!(app.sessions_in_column(Column::Waiting).len(), 1);
-        assert_eq!(app.sessions_in_column(Column::Working).len(), 0);
-    }
-
-    #[test]
-    fn debounce_new_waiting_starts_timer() {
-        let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Working, 100)).unwrap();
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-
-        // Transition to waiting
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        app.process_watcher_events();
-
-        // Timer should be set
-        assert!(app.debounce_timers.contains_key("sess"));
-    }
-
-    #[test]
-    fn debounce_keeps_session_in_working_column() {
-        let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Working, 100)).unwrap();
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-
-        // Transition to waiting
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        app.process_watcher_events();
-
-        // During debounce, session should stay in Working column
-        assert_eq!(app.sessions_in_column(Column::Working).len(), 1);
-        assert_eq!(app.sessions_in_column(Column::Waiting).len(), 0);
-    }
-
-    #[test]
-    fn debounce_expired_timer_shows_waiting() {
-        let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-
-        // Manually insert an expired debounce timer (6s ago > 5s threshold)
-        app.debounce_timers
-            .insert("sess".to_string(), Instant::now() - Duration::from_secs(6));
-
-        // Expired timer should not suppress — session shows in Waiting
-        assert_eq!(app.sessions_in_column(Column::Waiting).len(), 1);
-        assert_eq!(app.sessions_in_column(Column::Working).len(), 0);
-    }
-
-    #[test]
-    fn debounce_cancelled_on_working_transition() {
-        let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Working, 100)).unwrap();
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-
-        // Transition to waiting → starts debounce
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        app.process_watcher_events();
-        assert!(app.debounce_timers.contains_key("sess"));
-
-        // Transition back to working → cancels debounce
-        write_session_to(dir.path(), "sess", &make_session(Status::Working, 102)).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        app.process_watcher_events();
-        assert!(!app.debounce_timers.contains_key("sess"));
-        assert_eq!(app.sessions_in_column(Column::Working).len(), 1);
-    }
-
-    #[test]
-    fn debounce_timer_cleanup_on_session_removal() {
-        let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Working, 100)).unwrap();
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-
-        // Transition to waiting → starts debounce
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        app.process_watcher_events();
-        assert!(app.debounce_timers.contains_key("sess"));
-
-        // Remove session file → timer should be cleaned up
-        std::fs::remove_file(dir.path().join("sess.json")).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        app.process_watcher_events();
-        assert!(!app.debounce_timers.contains_key("sess"));
-    }
-
-    #[test]
-    fn process_debounce_timers_returns_newly_waiting() {
-        let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-
-        // Insert expired timer
-        app.debounce_timers
-            .insert("sess".to_string(), Instant::now() - Duration::from_secs(6));
-
-        let newly_waiting = app.process_debounce_timers();
-        assert_eq!(newly_waiting, vec!["sess"]);
-        assert!(!app.debounce_timers.contains_key("sess"));
-    }
-
-    #[test]
-    fn process_debounce_timers_keeps_active_timers() {
-        let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-
-        // Insert a fresh timer (not expired)
-        app.debounce_timers
-            .insert("sess".to_string(), Instant::now());
-
-        let newly_waiting = app.process_debounce_timers();
-        assert!(newly_waiting.is_empty());
-        assert!(app.debounce_timers.contains_key("sess"));
-    }
-
-    #[test]
-    fn auto_focus_jumps_to_waiting_session() {
+    fn auto_focus_jumps_to_needs_attention_session() {
         let dir = tempfile::tempdir().unwrap();
         write_session_to(dir.path(), "a", &make_session(Status::Working, 100)).unwrap();
-        write_session_to(dir.path(), "b", &make_session(Status::Waiting, 200)).unwrap();
-        write_session_to(dir.path(), "c", &make_session(Status::Waiting, 300)).unwrap();
+        write_session_to(dir.path(), "b", &make_session(Status::Idle, 200)).unwrap();
+        write_session_to(dir.path(), "c", &make_session(Status::Idle, 300)).unwrap();
 
         let mut app = App::with_registry_dir(dir.path()).unwrap();
         // Move focus to Working column
@@ -1169,30 +950,11 @@ mod tests {
             .position(|c| *c == Column::Working)
             .unwrap();
 
-        // Auto-focus on the second waiting session
+        // Auto-focus on the second idle session
         app.auto_focus_session("c");
-        assert_eq!(app.current_column(), Some(Column::Waiting));
-        assert_eq!(app.selected_rows.get(&Column::Waiting).copied(), Some(1));
+        assert_eq!(app.current_column(), Some(Column::NeedsAttention));
+        assert_eq!(app.selected_rows.get(&Column::NeedsAttention).copied(), Some(1));
         assert_eq!(app.selected_session(), Some("c"));
-    }
-
-    #[test]
-    fn debounce_not_restarted_for_already_waiting() {
-        let dir = tempfile::tempdir().unwrap();
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 100)).unwrap();
-        let mut app = App::with_registry_dir(dir.path()).unwrap();
-        // No debounce timer — session loaded at startup
-        assert!(!app.debounce_timers.contains_key("sess"));
-
-        // Re-write with same status (e.g., new seq) — should NOT start debounce
-        write_session_to(dir.path(), "sess", &make_session(Status::Waiting, 101)).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        app.process_watcher_events();
-
-        // Still no debounce timer (session was already waiting)
-        assert!(!app.debounce_timers.contains_key("sess"));
-        // Shows in Waiting column directly
-        assert_eq!(app.sessions_in_column(Column::Waiting).len(), 1);
     }
 
     // --- Age formatting tests ---
@@ -1227,8 +989,8 @@ mod tests {
     // --- Status icon tests ---
 
     #[test]
-    fn status_icon_waiting() {
-        assert_eq!(status_icon(&Status::Waiting), "?");
+    fn status_icon_idle() {
+        assert_eq!(status_icon(&Status::Idle), "?");
     }
 
     #[test]
@@ -1242,11 +1004,6 @@ mod tests {
     }
 
     #[test]
-    fn status_icon_idle() {
-        assert_eq!(status_icon(&Status::Idle), "○");
-    }
-
-    #[test]
     fn status_icon_done() {
         assert_eq!(status_icon(&Status::Done), "✓");
     }
@@ -1254,8 +1011,8 @@ mod tests {
     // --- Colour scheme tests ---
 
     #[test]
-    fn status_style_waiting_is_yellow() {
-        assert_eq!(status_style(&Status::Waiting).fg, Some(Color::Yellow));
+    fn status_style_idle_is_yellow() {
+        assert_eq!(status_style(&Status::Idle).fg, Some(Color::Yellow));
     }
 
     #[test]
@@ -1266,11 +1023,6 @@ mod tests {
     #[test]
     fn status_style_starting_groups_with_working() {
         assert_eq!(status_style(&Status::Starting).fg, Some(Color::Blue));
-    }
-
-    #[test]
-    fn status_style_idle_is_dark_gray() {
-        assert_eq!(status_style(&Status::Idle).fg, Some(Color::DarkGray));
     }
 
     #[test]
@@ -1294,8 +1046,8 @@ mod tests {
     }
 
     #[test]
-    fn msg_style_waiting_is_yellow() {
-        assert_eq!(msg_style(&Status::Waiting).fg, Some(Color::Yellow));
+    fn msg_style_idle_is_yellow() {
+        assert_eq!(msg_style(&Status::Idle).fg, Some(Color::Yellow));
     }
 
     #[test]
