@@ -173,15 +173,14 @@ impl App {
         entries
     }
 
-    /// Drain file watcher events and reload sessions if anything changed.
+    /// Reload sessions from registry directory.
+    ///
+    /// Called when the file watcher detects a registry change.  The triggering
+    /// event has already been consumed by `tokio::select!`, so we always
+    /// reload — attempting to drain more events first would miss single-event
+    /// notifications and could swallow unrelated transcript events from the
+    /// shared channel.
     pub fn process_watcher_events(&mut self) {
-        let mut changed = false;
-        while self.watcher_rx.try_recv().is_ok() {
-            changed = true;
-        }
-        if !changed {
-            return;
-        }
 
         let old_sessions = std::mem::take(&mut self.sessions);
         self.sessions = load_sessions_from(&self.registry_dir);
