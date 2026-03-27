@@ -46,7 +46,8 @@ enum Commands {
     Dashboard,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -94,6 +95,6 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Emit { ref status } => emit::run(status),
-        Commands::Dashboard => dashboard::run(),
+        Commands::Dashboard => dashboard::run().await,
     }
 }

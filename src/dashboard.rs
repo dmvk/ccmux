@@ -3,8 +3,9 @@
 
 use crate::registry::{self, Session, Status};
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use futures::StreamExt;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
@@ -12,8 +13,9 @@ use ratatui::style::{Color, Style};
 use ratatui::Terminal;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::time;
 
 /// Kanban columns displayed in the dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,7 +67,7 @@ pub struct App {
     /// Selected row index per column.
     pub selected_rows: HashMap<Column, usize>,
     /// File watcher event receiver.
-    watcher_rx: mpsc::Receiver<notify::Result<notify::Event>>,
+    watcher_rx: mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
     /// File watcher handle (must stay alive).
     _watcher: RecommendedWatcher,
     /// Registry directory being watched.
@@ -90,6 +92,8 @@ pub struct App {
     pub preview_lines: Vec<String>,
     /// Name of the session being previewed.
     pub preview_session: Option<String>,
+    /// Byte offsets into transcript files for incremental reading.
+    pub transcript_offsets: HashMap<String, u64>,
 }
 
 impl App {
@@ -104,7 +108,7 @@ impl App {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create registry dir: {}", dir.display()))?;
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
         let mut watcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         })
@@ -136,6 +140,7 @@ impl App {
             pending_focus: None,
             preview_lines: Vec::new(),
             preview_session: None,
+            transcript_offsets: HashMap::new(),
         };
 
         app.focus_initial_column();
@@ -434,11 +439,8 @@ impl App {
     }
 }
 
-/// Run the dashboard TUI event loop per PRD §10.
-///
-/// Single-threaded poll loop: crossterm::event::poll() with 1-second timeout.
-/// Each tick: drain keyboard events, drain file watcher events, process debounce.
-pub fn run() -> Result<()> {
+/// Run the dashboard TUI event loop.
+pub async fn run() -> Result<()> {
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)
@@ -447,19 +449,21 @@ pub fn run() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new()?;
-    let result = run_loop(&mut terminal, &mut app);
+    let result = run_loop(&mut terminal, &mut app).await;
 
-    // Restore terminal (always runs, even on error)
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
 
     result
 }
 
-fn run_loop(
+async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    let mut key_stream = EventStream::new();
+    let mut tick = time::interval(Duration::from_secs(1));
+
     while !app.should_quit {
         terminal.draw(|frame| {
             let area = frame.area();
@@ -489,79 +493,89 @@ fn run_loop(
             }
         })?;
 
-        // Poll for keyboard events (1-second timeout for age/debounce refresh)
-        if event::poll(Duration::from_secs(1))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match app.input_mode {
-                InputMode::Normal => match key.code {
-                    KeyCode::Char('q') => app.should_quit = true,
-                    KeyCode::Char('j') => app.move_down(),
-                    KeyCode::Char('k') => app.move_up(),
-                    KeyCode::Char('h') => app.move_left(),
-                    KeyCode::Char('l') => app.move_right(),
-                    KeyCode::Char('n') => {
-                        let cwd = app.default_cwd.clone();
-                        app.open_new_session_modal(&cwd);
+        tokio::select! {
+            Some(event) = key_stream.next() => {
+                if let Ok(Event::Key(key)) = event {
+                    if key.kind == KeyEventKind::Press {
+                        handle_key(app, key.code);
                     }
-                    KeyCode::Enter => {
-                        if let Some(name) = app.selected_session() {
-                            let name = name.to_owned();
-                            let _ = crate::zellij::go_to_tab(&name);
-                        }
-                    }
-                    KeyCode::Char('x') => {
-                        if let Some(name) = app.selected_session() {
-                            let name = name.to_owned();
-                            let _ = crate::zellij::close_tab(&name);
-                            let _ = registry::remove_session(&name);
-                        }
-                    }
-                    KeyCode::Char('p') => app.open_preview(),
-                    _ => {}
-                },
-                InputMode::Preview => match key.code {
-                    KeyCode::Esc => app.close_preview(),
-                    _ => {}
-                },
-                InputMode::NewSession => match key.code {
-                    KeyCode::Esc => app.close_modal(),
-                    KeyCode::Tab | KeyCode::BackTab => app.modal_toggle_field(),
-                    KeyCode::Backspace => app.modal_pop_char(),
-                    KeyCode::Enter => {
-                        if let Ok((name, dir)) = app.validate_modal() {
-                            let env_var = format!("CCMUX_SESSION={name}");
-                            let result = crate::zellij::new_tab(
-                                &name,
-                                "env",
-                                &[&env_var, "claude", "--dangerously-skip-permissions", "--worktree"],
-                                Some(&dir),
-                            );
-                            if let Err(e) = result {
-                                app.modal_error = Some(format!("failed to create session: {e}"));
-                            } else {
-                                app.pending_focus = Some(name.clone());
-                                app.close_modal();
-                            }
-                        }
-                    }
-                    KeyCode::Char(c) => app.modal_push_char(c),
-                    _ => {}
-                },
+                }
             }
-        }
-
-        // Drain file watcher events and reload sessions
-        app.process_watcher_events();
-
-        // Refresh preview transcript on each tick
-        if app.input_mode == InputMode::Preview {
-            app.refresh_preview();
+            Some(event) = app.watcher_rx.recv() => {
+                if event.is_ok() {
+                    app.process_watcher_events();
+                }
+            }
+            _ = tick.tick() => {
+                // 1-second tick for age display refresh — triggers redraw
+                // Also refresh preview transcript on each tick
+                if app.input_mode == InputMode::Preview {
+                    app.refresh_preview();
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+fn handle_key(app: &mut App, code: KeyCode) {
+    match app.input_mode {
+        InputMode::Normal => match code {
+            KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Char('j') => app.move_down(),
+            KeyCode::Char('k') => app.move_up(),
+            KeyCode::Char('h') => app.move_left(),
+            KeyCode::Char('l') => app.move_right(),
+            KeyCode::Char('n') => {
+                let cwd = app.default_cwd.clone();
+                app.open_new_session_modal(&cwd);
+            }
+            KeyCode::Enter => {
+                if let Some(name) = app.selected_session() {
+                    let name = name.to_owned();
+                    let _ = crate::zellij::go_to_tab(&name);
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(name) = app.selected_session() {
+                    let name = name.to_owned();
+                    let _ = crate::zellij::close_tab(&name);
+                    let _ = registry::remove_session(&name);
+                }
+            }
+            KeyCode::Char('p') => app.open_preview(),
+            _ => {}
+        },
+        InputMode::Preview => match code {
+            KeyCode::Esc => app.close_preview(),
+            _ => {}
+        },
+        InputMode::NewSession => match code {
+            KeyCode::Esc => app.close_modal(),
+            KeyCode::Tab | KeyCode::BackTab => app.modal_toggle_field(),
+            KeyCode::Backspace => app.modal_pop_char(),
+            KeyCode::Enter => {
+                if let Ok((name, dir)) = app.validate_modal() {
+                    let env_var = format!("CCMUX_SESSION={name}");
+                    let result = crate::zellij::new_tab(
+                        &name,
+                        "env",
+                        &[&env_var, "claude", "--dangerously-skip-permissions", "--worktree"],
+                        Some(&dir),
+                    );
+                    if let Err(e) = result {
+                        app.modal_error = Some(format!("failed to create session: {e}"));
+                    } else {
+                        app.pending_focus = Some(name.clone());
+                        app.close_modal();
+                    }
+                }
+            }
+            KeyCode::Char(c) => app.modal_push_char(c),
+            _ => {}
+        },
+    }
 }
 
 /// Return the status icon for a session per PRD §8.
