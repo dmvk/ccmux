@@ -483,7 +483,6 @@ impl App {
 
     /// Refresh the preview panel by re-reading the transcript tail.
     pub fn refresh_preview(&mut self) {
-        use crate::ui::preview::PreviewLine;
         if let Some(ref name) = self.preview_session {
             if let Some(session) = self.sessions.get(name)
                 && let Some(ref tp) = session.transcript_path
@@ -491,27 +490,19 @@ impl App {
                 let path = std::path::Path::new(tp);
                 if path.exists() {
                     let entries = crate::transcript::read_tail_all(path, 50);
-                    self.preview_lines = entries
-                        .iter()
-                        .map(|entry| match entry {
-                            crate::transcript::TranscriptEntry::User(text) => {
-                                PreviewLine::User(text.clone())
-                            }
-                            crate::transcript::TranscriptEntry::Assistant(text) => {
-                                PreviewLine::Assistant(text.clone())
-                            }
-                            crate::transcript::TranscriptEntry::Tool(detail) => {
-                                PreviewLine::Tool {
-                                    name: detail.clone(),
-                                    desc: String::new(),
-                                }
-                            }
-                        })
-                        .collect();
+                    let old_len = self.preview_lines.len();
+                    self.preview_lines = build_preview_lines(&entries);
+                    if self.preview_scroll_offset > 0 {
+                        let new_len = self.preview_lines.len();
+                        let delta = new_len.saturating_sub(old_len);
+                        self.preview_scroll_offset += delta;
+                    }
                     return;
                 }
             }
-            self.preview_lines = Vec::new();
+            self.preview_lines = vec![crate::ui::preview::PreviewLine::User(
+                "(transcript not available)".to_string(),
+            )];
         }
     }
 
@@ -669,6 +660,36 @@ async fn run_loop(
     }
 
     Ok(())
+}
+
+fn build_preview_lines(
+    entries: &[crate::transcript::TranscriptEntry],
+) -> Vec<crate::ui::preview::PreviewLine> {
+    use crate::transcript::TranscriptEntry;
+    use crate::ui::preview::PreviewLine;
+
+    let mut lines = Vec::new();
+    for entry in entries {
+        match entry {
+            TranscriptEntry::User(text) => {
+                if !lines.is_empty() {
+                    lines.push(PreviewLine::Separator);
+                }
+                lines.push(PreviewLine::User(text.clone()));
+            }
+            TranscriptEntry::Assistant(text) => {
+                lines.push(PreviewLine::Assistant(text.clone()));
+            }
+            TranscriptEntry::Tool(detail) => {
+                let (name, desc) = match detail.split_once(' ') {
+                    Some((n, d)) => (n.to_string(), d.to_string()),
+                    None => (detail.clone(), String::new()),
+                };
+                lines.push(PreviewLine::Tool { name, desc });
+            }
+        }
+    }
+    lines
 }
 
 fn handle_key(app: &mut App, code: KeyCode) {

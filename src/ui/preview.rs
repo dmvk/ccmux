@@ -329,4 +329,51 @@ mod tests {
         let bg = buf[(1u16, 2u16)].style().bg;
         assert_ne!(bg, Some(Color::DarkGray));
     }
+
+    #[test]
+    fn refresh_preview_builds_typed_lines_with_separators() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+
+        // Create a fake transcript file
+        let transcript_dir = dir.path().join("transcripts");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript_path = transcript_dir.join("test.jsonl");
+        let content = r#"{"type":"user","message":{"role":"user","content":"hello"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit","id":"x","input":{"file_path":"/a/b/main.rs"}}]}}
+{"type":"user","message":{"role":"user","content":"thanks"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"welcome"}]}}
+"#;
+        std::fs::write(&transcript_path, content).unwrap();
+
+        let session = crate::registry::Session {
+            status: crate::registry::Status::Working,
+            tool: None,
+            desc: None,
+            msg: None,
+            ts: 1000,
+            seq: 1,
+            dir: None,
+            session_id: None,
+            transcript_path: Some(transcript_path.to_string_lossy().to_string()),
+            input_tokens: None,
+        };
+        app.sessions.insert("test-sess".to_string(), session);
+        app.preview_session = Some("test-sess".to_string());
+
+        app.refresh_preview();
+
+        // Should have: User, Assistant, Tool, Separator, User, Assistant
+        assert!(!app.preview_lines.is_empty());
+        let has_separator = app.preview_lines.iter().any(|l| matches!(l, PreviewLine::Separator));
+        assert!(has_separator, "should have separator between turns");
+
+        assert!(matches!(&app.preview_lines[0], PreviewLine::User(_)));
+        assert!(matches!(&app.preview_lines[1], PreviewLine::Assistant(_)));
+        assert!(matches!(&app.preview_lines[2], PreviewLine::Tool { .. }));
+        assert!(matches!(&app.preview_lines[3], PreviewLine::Separator));
+        assert!(matches!(&app.preview_lines[4], PreviewLine::User(_)));
+        assert!(matches!(&app.preview_lines[5], PreviewLine::Assistant(_)));
+    }
 }
