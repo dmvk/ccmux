@@ -15,9 +15,6 @@ use std::path::PathBuf;
 fn ccmux_hooks() -> Vec<(&'static str, &'static str)> {
     vec![
         ("SessionStart", "\"$HOME/.cargo/bin/ccmux\" emit --status starting"),
-        ("PreToolUse", "\"$HOME/.cargo/bin/ccmux\" emit --status working"),
-        ("Notification", "\"$HOME/.cargo/bin/ccmux\" emit --status waiting"),
-        ("Stop", "\"$HOME/.cargo/bin/ccmux\" emit --status idle"),
         ("SessionEnd", "\"$HOME/.cargo/bin/ccmux\" emit --status done"),
     ]
 }
@@ -201,11 +198,8 @@ mod tests {
         assert!(changed);
 
         let hooks = settings["hooks"].as_object().unwrap();
-        assert_eq!(hooks.len(), 5);
+        assert_eq!(hooks.len(), 2);
         assert!(hooks.contains_key("SessionStart"));
-        assert!(hooks.contains_key("PreToolUse"));
-        assert!(hooks.contains_key("Notification"));
-        assert!(hooks.contains_key("Stop"));
         assert!(hooks.contains_key("SessionEnd"));
 
         // Verify structure of one hook
@@ -222,7 +216,7 @@ mod tests {
     fn merge_preserves_existing_hooks() {
         let mut settings = json!({
             "hooks": {
-                "PreToolUse": [
+                "SessionStart": [
                     {
                         "matcher": "Bash",
                         "hooks": [
@@ -236,14 +230,14 @@ mod tests {
         let changed = merge_hooks(&mut settings);
         assert!(changed);
 
-        let pre_tool = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        let session_start = settings["hooks"]["SessionStart"].as_array().unwrap();
         // Should have the existing hook AND the new ccmux hook
-        assert_eq!(pre_tool.len(), 2);
+        assert_eq!(session_start.len(), 2);
         // Original is preserved
-        assert_eq!(pre_tool[0]["matcher"], "Bash");
+        assert_eq!(session_start[0]["matcher"], "Bash");
         // ccmux hook appended
-        let cmd = pre_tool[1]["hooks"][0]["command"].as_str().unwrap();
-        assert!(cmd.contains("ccmux") && cmd.contains("emit --status working"));
+        let cmd = session_start[1]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.contains("ccmux") && cmd.contains("emit --status starting"));
     }
 
     #[test]
