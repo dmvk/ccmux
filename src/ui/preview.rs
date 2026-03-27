@@ -376,4 +376,66 @@ mod tests {
         assert!(matches!(&app.preview_lines[4], PreviewLine::User(_)));
         assert!(matches!(&app.preview_lines[5], PreviewLine::Assistant(_)));
     }
+
+    #[test]
+    fn scroll_offset_affects_visible_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.preview_session = Some("s".to_string());
+
+        // Create 20 lines
+        app.preview_lines = (0..20)
+            .map(|i| PreviewLine::Assistant(format!("msg {i}")))
+            .collect();
+
+        // With offset 0 and body_height=5 (area height 7 = header+sep+5 body), should show lines 15-19
+        let area = Rect::new(0, 0, 80, 7);
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+        let text = buffer_text(&buf);
+        assert!(text.contains("msg 19"), "should show last line at offset 0");
+        assert!(!text.contains("msg 14"), "should not show line 14 at offset 0");
+
+        // With offset 5, should show lines 10-14
+        app.preview_scroll_offset = 5;
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+        let text = buffer_text(&buf);
+        assert!(text.contains("msg 14"), "should show line 14 at offset 5");
+        assert!(!text.contains("msg 19"), "should not show last line at offset 5");
+    }
+
+    #[test]
+    fn scroll_indicator_shown_when_scrolled_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.preview_session = Some("s".to_string());
+        app.preview_lines = (0..20)
+            .map(|i| PreviewLine::Assistant(format!("msg {i}")))
+            .collect();
+        app.preview_scroll_offset = 3;
+
+        let area = Rect::new(0, 0, 80, 7);
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+        let text = buffer_text(&buf);
+        assert!(text.contains("more"), "should show scroll indicator");
+    }
+
+    #[test]
+    fn no_scroll_indicator_at_bottom() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.preview_session = Some("s".to_string());
+        app.preview_lines = (0..20)
+            .map(|i| PreviewLine::Assistant(format!("msg {i}")))
+            .collect();
+        app.preview_scroll_offset = 0;
+
+        let area = Rect::new(0, 0, 80, 7);
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+        let text = buffer_text(&buf);
+        assert!(!text.contains("more"), "should not show scroll indicator at bottom");
+    }
 }

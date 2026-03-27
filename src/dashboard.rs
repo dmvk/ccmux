@@ -481,6 +481,16 @@ impl App {
         self.preview_scroll_offset = 0;
     }
 
+    /// Scroll the preview panel up (toward older content).
+    pub fn preview_scroll_up(&mut self) {
+        self.preview_scroll_offset += 1;
+    }
+
+    /// Scroll the preview panel down (toward newer content).
+    pub fn preview_scroll_down(&mut self) {
+        self.preview_scroll_offset = self.preview_scroll_offset.saturating_sub(1);
+    }
+
     /// Refresh the preview panel by re-reading the transcript tail.
     pub fn refresh_preview(&mut self) {
         if let Some(ref name) = self.preview_session {
