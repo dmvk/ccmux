@@ -3,90 +3,48 @@
 // Called by Claude Code hooks. Reads CCMUX_SESSION env var for the session name,
 // parses the hook JSON payload from stdin, and atomically writes the session file.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::io::{IsTerminal, Read};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::registry::{self, Session, Status};
 
 /// Parse a --status flag value into a Status enum.
-fn parse_status(s: &str) -> Result<Status> {
+/// Returns None for unknown values (old hooks may still fire with legacy statuses).
+fn parse_status(s: &str) -> Option<Status> {
     match s {
-        "starting" => Ok(Status::Starting),
-        "working" => Ok(Status::Working),
-        "idle" => Ok(Status::Idle),
-        "done" => Ok(Status::Done),
-        _ => bail!("unknown status: {s}"),
+        "starting" => Some(Status::Starting),
+        "done" => Some(Status::Done),
+        _ => None,
     }
 }
 
 /// Extract fields from the Claude Code hook stdin JSON payload.
 struct HookPayload {
-    tool_name: Option<String>,
-    tool_desc: Option<String>,
-    message: Option<String>,
     cwd: Option<String>,
     session_id: Option<String>,
+    transcript_path: Option<String>,
 }
 
 fn parse_stdin_payload(stdin_data: &str) -> HookPayload {
     let val: serde_json::Value = serde_json::from_str(stdin_data).unwrap_or_default();
-
-    let tool_name = val
-        .get("tool_name")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    let message = val
-        .get("message")
-        .and_then(|v| v.as_str())
-        .map(|s| truncate(s, 80).to_string());
 
     let cwd = val
         .get("cwd")
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let tool_desc = val
-        .get("tool_input")
-        .and_then(|ti| {
-            let fields = [
-                "description", "file_path", "pattern", "query", "url",
-                "command", "title", "message",
-            ];
-            fields.iter().find_map(|f| {
-                ti.get(f)
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-            })
-        })
-        .map(|s| truncate(s, 80).to_string());
-
     let session_id = val
         .get("session_id")
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    HookPayload {
-        tool_name,
-        tool_desc,
-        message,
-        cwd,
-        session_id,
-    }
-}
+    let transcript_path = val
+        .get("transcript_path")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        // Find a char boundary at or before max
-        let mut end = max;
-        while !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        &s[..end]
-    }
+    HookPayload { cwd, session_id, transcript_path }
 }
 
 /// Run the emit subcommand.
@@ -118,7 +76,10 @@ pub fn emit_to(
     status_str: &str,
     stdin_data: &str,
 ) -> Result<()> {
-    let status = parse_status(status_str)?;
+    let status = match parse_status(status_str) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
     let payload = parse_stdin_payload(stdin_data);
 
     // Read existing session to carry forward seq and dir
@@ -134,26 +95,6 @@ pub fn emit_to(
         existing.as_ref().and_then(|s| s.dir.clone())
     };
 
-    // tool + desc: only populated when working
-    let tool = if status == Status::Working {
-        payload.tool_name
-    } else {
-        None
-    };
-
-    let desc = if status == Status::Working {
-        payload.tool_desc
-    } else {
-        None
-    };
-
-    // msg: only populated when idle
-    let msg = if status == Status::Idle {
-        payload.message
-    } else {
-        None
-    };
-
     // session_id: set on --status starting, preserved on subsequent writes
     let session_id = if status == Status::Starting {
         payload.session_id.or_else(|| existing.as_ref().and_then(|s| s.session_id.clone()))
@@ -161,21 +102,24 @@ pub fn emit_to(
         existing.as_ref().and_then(|s| s.session_id.clone())
     };
 
-    // Carry forward transcript_path and input_tokens from existing session
-    let transcript_path = existing.as_ref().and_then(|s| s.transcript_path.clone());
-    let input_tokens = existing.as_ref().and_then(|s| s.input_tokens);
+    // transcript_path: set on starting, preserved on subsequent writes
+    let transcript_path = if status == Status::Starting {
+        payload.transcript_path.or_else(|| existing.as_ref().and_then(|s| s.transcript_path.clone()))
+    } else {
+        existing.as_ref().and_then(|s| s.transcript_path.clone())
+    };
 
     let session = Session {
         status,
-        tool,
-        desc,
-        msg,
+        tool: None,
+        desc: None,
+        msg: None,
         ts,
         seq,
         dir,
         session_id,
         transcript_path,
-        input_tokens,
+        input_tokens: existing.as_ref().and_then(|s| s.input_tokens),
     };
 
     registry::write_session_to(registry_dir, session_name, &session)?;
@@ -206,7 +150,7 @@ mod tests {
     fn emit_to_increments_seq() {
         let dir = tempfile::tempdir().unwrap();
         emit_to(dir.path(), "s1", "starting", "{}").unwrap();
-        emit_to(dir.path(), "s1", "working", r#"{"tool_name":"Bash"}"#).unwrap();
+        emit_to(dir.path(), "s1", "done", "{}").unwrap();
 
         let session = registry::read_session_from(dir.path(), "s1")
             .unwrap()
@@ -218,7 +162,7 @@ mod tests {
     fn emit_to_preserves_dir_across_transitions() {
         let dir = tempfile::tempdir().unwrap();
         emit_to(dir.path(), "s1", "starting", r#"{"cwd":"/project"}"#).unwrap();
-        emit_to(dir.path(), "s1", "working", r#"{"tool_name":"Edit"}"#).unwrap();
+        emit_to(dir.path(), "s1", "done", "{}").unwrap();
 
         let session = registry::read_session_from(dir.path(), "s1")
             .unwrap()
@@ -227,20 +171,81 @@ mod tests {
     }
 
     #[test]
-    fn emit_to_rejects_invalid_status() {
+    fn emit_to_ignores_invalid_status() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(emit_to(dir.path(), "s1", "bogus", "{}").is_err());
+        // Unknown statuses should be silently ignored, not error
+        assert!(emit_to(dir.path(), "s1", "bogus", "{}").is_ok());
+        // No session file should be written
+        let session = registry::read_session_from(dir.path(), "s1").unwrap();
+        assert!(session.is_none());
     }
 
     #[test]
     fn emit_to_with_empty_stdin() {
         let dir = tempfile::tempdir().unwrap();
-        emit_to(dir.path(), "s1", "idle", "").unwrap();
+        emit_to(dir.path(), "s1", "done", "").unwrap();
 
         let session = registry::read_session_from(dir.path(), "s1")
             .unwrap()
             .unwrap();
-        assert_eq!(session.status, Status::Idle);
+        assert_eq!(session.status, Status::Done);
+    }
+
+    // ── transcript_path tests ───────────────────────────────────────
+
+    #[test]
+    fn emit_starting_parses_transcript_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = r#"{"cwd":"/tmp","transcript_path":"/Users/bob/.claude/projects/foo/abc.jsonl"}"#;
+        emit_to(dir.path(), "s1", "starting", payload).unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1").unwrap().unwrap();
+        assert_eq!(session.transcript_path.as_deref(), Some("/Users/bob/.claude/projects/foo/abc.jsonl"));
+    }
+
+    #[test]
+    fn emit_preserves_transcript_path_across_transitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = r#"{"cwd":"/tmp","transcript_path":"/path/to/transcript.jsonl"}"#;
+        emit_to(dir.path(), "s1", "starting", payload).unwrap();
+        emit_to(dir.path(), "s1", "done", "{}").unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1").unwrap().unwrap();
+        assert_eq!(session.transcript_path.as_deref(), Some("/path/to/transcript.jsonl"));
+    }
+
+    #[test]
+    fn emit_unknown_status_ignored_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        // Old hooks may still fire with "working", "waiting", "idle" — should not error
+        let result = emit_to(dir.path(), "s1", "working", "{}");
+        assert!(result.is_ok());
+        // No file written since session doesn't exist yet
+        let session = registry::read_session_from(dir.path(), "s1").unwrap();
+        assert!(session.is_none());
+    }
+
+    // ── session_id tests ────────────────────────────────────────────
+
+    #[test]
+    fn emit_starting_parses_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = r#"{"cwd":"/tmp","session_id":"abc123"}"#;
+        emit_to(dir.path(), "s1", "starting", payload).unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1").unwrap().unwrap();
+        assert_eq!(session.session_id.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn emit_preserves_session_id_across_transitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = r#"{"cwd":"/tmp","session_id":"abc123"}"#;
+        emit_to(dir.path(), "s1", "starting", payload).unwrap();
+        emit_to(dir.path(), "s1", "done", "{}").unwrap();
+
+        let session = registry::read_session_from(dir.path(), "s1").unwrap().unwrap();
+        assert_eq!(session.session_id.as_deref(), Some("abc123"));
     }
 
     // ── e2e: emit → dashboard visibility ────────────────────────────
@@ -249,9 +254,8 @@ mod tests {
     fn emitted_session_appears_in_dashboard() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Simulate the full hook lifecycle
+        // Simulate the full hook lifecycle (only starting and done are valid)
         emit_to(dir.path(), "trader", "starting", r#"{"cwd":"/home/bob/trade"}"#).unwrap();
-        emit_to(dir.path(), "trader", "working", r#"{"tool_name":"Bash"}"#).unwrap();
 
         // Dashboard should see the session
         let app = App::with_registry_dir(dir.path()).unwrap();
@@ -260,8 +264,7 @@ mod tests {
             "dashboard must show the emitted session"
         );
         let session = &app.sessions["trader"];
-        assert_eq!(session.status, Status::Working);
-        assert_eq!(session.tool.as_deref(), Some("Bash"));
+        assert_eq!(session.status, Status::Starting);
         assert_eq!(session.dir.as_deref(), Some("/home/bob/trade"));
     }
 
@@ -269,23 +272,19 @@ mod tests {
     fn multiple_sessions_appear_in_dashboard_columns() {
         let dir = tempfile::tempdir().unwrap();
 
-        emit_to(dir.path(), "alpha", "working", r#"{"tool_name":"Edit"}"#).unwrap();
-        emit_to(dir.path(), "beta", "idle", r#"{"message":"Approve?"}"#).unwrap();
+        emit_to(dir.path(), "alpha", "starting", r#"{"cwd":"/alpha"}"#).unwrap();
         emit_to(dir.path(), "gamma", "done", "{}").unwrap();
 
         let app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.sessions.len(), 3);
+        assert_eq!(app.sessions.len(), 2);
 
-        // Check column assignments
+        // Check column assignments — Starting status maps to the Working column
         use crate::dashboard::Column;
         let working = app.sessions_in_column(Column::Working);
-        let needs_attention = app.sessions_in_column(Column::NeedsAttention);
         let done = app.sessions_in_column(Column::Done);
 
         assert_eq!(working.len(), 1);
         assert_eq!(working[0].0, "alpha");
-        assert_eq!(needs_attention.len(), 1);
-        assert_eq!(needs_attention[0].0, "beta");
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].0, "gamma");
     }
@@ -294,25 +293,15 @@ mod tests {
     fn session_lifecycle_updates_dashboard() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Start → Working → Idle → Done
+        // Start → Done
         emit_to(dir.path(), "s1", "starting", r#"{"cwd":"/proj"}"#).unwrap();
         let app = App::with_registry_dir(dir.path()).unwrap();
         assert_eq!(app.sessions["s1"].status, Status::Starting);
 
-        emit_to(dir.path(), "s1", "working", r#"{"tool_name":"Bash"}"#).unwrap();
-        let app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.sessions["s1"].status, Status::Working);
-        assert_eq!(app.sessions["s1"].tool.as_deref(), Some("Bash"));
-
-        emit_to(dir.path(), "s1", "idle", r#"{"message":"Continue?"}"#).unwrap();
-        let app = App::with_registry_dir(dir.path()).unwrap();
-        assert_eq!(app.sessions["s1"].status, Status::Idle);
-        assert_eq!(app.sessions["s1"].msg.as_deref(), Some("Continue?"));
-
         emit_to(dir.path(), "s1", "done", "{}").unwrap();
         let app = App::with_registry_dir(dir.path()).unwrap();
         assert_eq!(app.sessions["s1"].status, Status::Done);
-        // dir should be preserved through the entire lifecycle
+        // dir should be preserved through the lifecycle
         assert_eq!(app.sessions["s1"].dir.as_deref(), Some("/proj"));
     }
 
@@ -320,31 +309,16 @@ mod tests {
 
     #[test]
     fn parse_status_valid() {
-        assert_eq!(parse_status("starting").unwrap(), Status::Starting);
-        assert_eq!(parse_status("working").unwrap(), Status::Working);
-        assert_eq!(parse_status("idle").unwrap(), Status::Idle);
-        assert_eq!(parse_status("done").unwrap(), Status::Done);
+        assert_eq!(parse_status("starting"), Some(Status::Starting));
+        assert_eq!(parse_status("done"), Some(Status::Done));
     }
 
     #[test]
-    fn parse_status_invalid() {
-        assert!(parse_status("bogus").is_err());
-    }
-
-    #[test]
-    fn parse_payload_pretooluse() {
-        let json = r#"{"tool_name": "Edit", "tool_input": {}}"#;
-        let p = parse_stdin_payload(json);
-        assert_eq!(p.tool_name.as_deref(), Some("Edit"));
-        assert!(p.message.is_none());
-    }
-
-    #[test]
-    fn parse_payload_notification() {
-        let json = r#"{"message": "Should I increase position size?"}"#;
-        let p = parse_stdin_payload(json);
-        assert!(p.tool_name.is_none());
-        assert_eq!(p.message.as_deref(), Some("Should I increase position size?"));
+    fn parse_status_unknown_returns_none() {
+        assert!(parse_status("bogus").is_none());
+        assert!(parse_status("working").is_none());
+        assert!(parse_status("waiting").is_none());
+        assert!(parse_status("idle").is_none());
     }
 
     #[test]
@@ -355,116 +329,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_payload_transcript_path() {
+        let json = r#"{"cwd": "/tmp", "transcript_path": "/path/to/transcript.jsonl"}"#;
+        let p = parse_stdin_payload(json);
+        assert_eq!(p.transcript_path.as_deref(), Some("/path/to/transcript.jsonl"));
+    }
+
+    #[test]
+    fn parse_payload_session_id() {
+        let json = r#"{"cwd": "/tmp", "session_id": "abc123"}"#;
+        let p = parse_stdin_payload(json);
+        assert_eq!(p.session_id.as_deref(), Some("abc123"));
+    }
+
+    #[test]
     fn parse_payload_empty_stdin() {
         let p = parse_stdin_payload("");
-        assert!(p.tool_name.is_none());
-        assert!(p.message.is_none());
         assert!(p.cwd.is_none());
+        assert!(p.transcript_path.is_none());
+        assert!(p.session_id.is_none());
     }
 
     #[test]
     fn parse_payload_invalid_json() {
         let p = parse_stdin_payload("not json at all");
-        assert!(p.tool_name.is_none());
-    }
-
-    #[test]
-    fn truncate_short() {
-        assert_eq!(truncate("hello", 80), "hello");
-    }
-
-    #[test]
-    fn truncate_long() {
-        let long = "a".repeat(100);
-        assert_eq!(truncate(&long, 80).len(), 80);
-    }
-
-    #[test]
-    fn truncate_multibyte() {
-        // "café" is 5 bytes (é is 2 bytes)
-        let s = "café";
-        let t = truncate(s, 4);
-        assert!(t.len() <= 4);
-        assert_eq!(t, "caf"); // cuts before the multi-byte char
-    }
-
-    // ── tool_input cascade tests ────────────────────────────────────
-
-    #[test]
-    fn parse_payload_extracts_desc_from_description() {
-        let json = r#"{"tool_name":"Bash","tool_input":{"command":"npm install","description":"Install dependencies"}}"#;
-        let p = parse_stdin_payload(json);
-        assert_eq!(p.tool_name.as_deref(), Some("Bash"));
-        assert_eq!(p.tool_desc.as_deref(), Some("Install dependencies"));
-    }
-
-    #[test]
-    fn parse_payload_cascade_file_path() {
-        let json = r#"{"tool_name":"Read","tool_input":{"file_path":"/src/main.rs"}}"#;
-        let p = parse_stdin_payload(json);
-        assert_eq!(p.tool_desc.as_deref(), Some("/src/main.rs"));
-    }
-
-    #[test]
-    fn parse_payload_cascade_pattern() {
-        let json = r#"{"tool_name":"Grep","tool_input":{"pattern":"TODO","path":"src/"}}"#;
-        let p = parse_stdin_payload(json);
-        assert_eq!(p.tool_desc.as_deref(), Some("TODO"));
-    }
-
-    #[test]
-    fn parse_payload_cascade_query() {
-        let json = r#"{"tool_name":"WebSearch","tool_input":{"query":"rust serde"}}"#;
-        let p = parse_stdin_payload(json);
-        assert_eq!(p.tool_desc.as_deref(), Some("rust serde"));
-    }
-
-    #[test]
-    fn parse_payload_cascade_skips_empty() {
-        let json = r#"{"tool_name":"Bash","tool_input":{"description":"","command":"ls -la"}}"#;
-        let p = parse_stdin_payload(json);
-        assert_eq!(p.tool_desc.as_deref(), Some("ls -la"));
-    }
-
-    #[test]
-    fn parse_payload_no_tool_input() {
-        let json = r#"{"tool_name":"Bash"}"#;
-        let p = parse_stdin_payload(json);
-        assert_eq!(p.tool_name.as_deref(), Some("Bash"));
-        assert_eq!(p.tool_desc, None);
-    }
-
-    #[test]
-    fn parse_payload_desc_truncated_at_80() {
-        let long_cmd = "a".repeat(120);
-        let json = format!(r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#, long_cmd);
-        let p = parse_stdin_payload(&json);
-        assert_eq!(p.tool_desc.as_ref().unwrap().len(), 80);
-    }
-
-    #[test]
-    fn emit_to_stores_desc_from_tool_input() {
-        let dir = tempfile::tempdir().unwrap();
-        let json = r#"{"tool_name":"Bash","tool_input":{"description":"Install deps","command":"npm i"}}"#;
-        emit_to(dir.path(), "s1", "working", json).unwrap();
-
-        let session = registry::read_session_from(dir.path(), "s1")
-            .unwrap()
-            .unwrap();
-        assert_eq!(session.tool.as_deref(), Some("Bash"));
-        assert_eq!(session.desc.as_deref(), Some("Install deps"));
-    }
-
-    #[test]
-    fn emit_to_clears_desc_on_non_working() {
-        let dir = tempfile::tempdir().unwrap();
-        let json = r#"{"tool_name":"Bash","tool_input":{"description":"Install deps"}}"#;
-        emit_to(dir.path(), "s1", "working", json).unwrap();
-        emit_to(dir.path(), "s1", "idle", r#"{"message":"Continue?"}"#).unwrap();
-
-        let session = registry::read_session_from(dir.path(), "s1")
-            .unwrap()
-            .unwrap();
-        assert_eq!(session.desc, None);
+        assert!(p.cwd.is_none());
     }
 }
