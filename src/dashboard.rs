@@ -479,29 +479,20 @@ impl App {
     /// Refresh the preview panel by re-reading the transcript tail.
     pub fn refresh_preview(&mut self) {
         if let Some(ref name) = self.preview_session {
-            if let Some(session) = self.sessions.get(name) {
-                if let Some(ref tp) = session.transcript_path {
-                    let path = std::path::Path::new(tp);
-                    if path.exists() {
-                        let entries = crate::transcript::read_tail_all(path, 50);
-                        self.preview_lines = entries
-                            .iter()
-                            .map(crate::transcript::format_entry)
-                            .collect();
-                        return;
-                    }
+            if let Some(session) = self.sessions.get(name)
+                && let Some(ref tp) = session.transcript_path
+            {
+                let path = std::path::Path::new(tp);
+                if path.exists() {
+                    let entries = crate::transcript::read_tail_all(path, 50);
+                    self.preview_lines = entries
+                        .iter()
+                        .map(crate::transcript::format_entry)
+                        .collect();
+                    return;
                 }
             }
             self.preview_lines = vec!["(transcript not available)".to_string()];
-        }
-    }
-
-    /// Returns the currently active modal text buffer (name or dir).
-    pub fn active_modal_buffer(&self) -> &str {
-        if self.modal_field == 0 {
-            &self.modal_name
-        } else {
-            &self.modal_dir
         }
     }
 
@@ -689,10 +680,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Char('p') => app.open_preview(),
             _ => {}
         },
-        InputMode::Preview => match code {
-            KeyCode::Esc => app.close_preview(),
-            _ => {}
-        },
+        InputMode::Preview => if code == KeyCode::Esc { app.close_preview() },
         InputMode::NewSession => match code {
             KeyCode::Esc => app.close_modal(),
             KeyCode::Tab | KeyCode::BackTab => app.modal_toggle_field(),

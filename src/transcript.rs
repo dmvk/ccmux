@@ -43,12 +43,12 @@ fn summarize_tool_input(tool_name: &str, input: Option<&serde_json::Value>) -> S
         "Read" => input
             .get("file_path")
             .and_then(|f| f.as_str())
-            .map(|s| shorten_path(s))
+            .map(shorten_path)
             .unwrap_or_default(),
         "Edit" | "Write" => input
             .get("file_path")
             .and_then(|f| f.as_str())
-            .map(|s| shorten_path(s))
+            .map(shorten_path)
             .unwrap_or_default(),
         "Grep" => input
             .get("pattern")
@@ -292,7 +292,7 @@ pub fn parse_new_bytes(bytes: &[u8]) -> Option<TranscriptUpdate> {
                                 None
                             }
                         })
-                        .last()
+                        .next_back()
                 })
                 .map(|s| truncate_str(s, 60))
         };
