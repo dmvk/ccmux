@@ -5,36 +5,39 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+/// Typed representation of a transcript preview line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreviewLine {
+    User(String),
+    Assistant(String),
+    Tool { name: String, desc: String },
+    Separator,
+}
+
 /// Render the transcript preview panel into the given area.
 ///
 /// Layout:
-///   Line 0: "Preview: <session_name>          Esc close"
-///   Line 1: horizontal separator
-///   Lines 2+: transcript entries (tail, most recent at bottom)
+///   Line 0: session name (bold white) left, keybinding hints (DarkGray) right
+///   Line 1: horizontal separator (`─` repeated, DarkGray)
+///   Lines 2+: transcript entries with scroll support
 pub fn render_preview(app: &App, area: Rect, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
         return;
     }
 
     let w = area.width as usize;
-    let bg = Style::default().bg(Color::DarkGray).fg(Color::White);
-
-    // Clear the area with background
-    let blank: String = " ".repeat(w);
-    for dy in 0..area.height {
-        buf.set_string(area.x, area.y + dy, &blank, bg);
-    }
 
     // Line 0: Header
     let session_name = app.preview_session.as_deref().unwrap_or("?");
-    let header_left = format!(" Preview: {session_name}");
-    let header_right = "Esc close ";
-    let header_style = bg.add_modifier(Modifier::BOLD);
+    let header_left = format!(" {session_name}");
+    let header_right = "\u{2191}\u{2193} scroll  hjkl navigate  Esc close ";
+    let header_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let hint_style = Style::default().fg(Color::DarkGray);
 
     buf.set_string(area.x, area.y, &header_left, header_style);
     if w > header_right.len() {
         let right_x = area.x + (w - header_right.len()) as u16;
-        buf.set_string(right_x, area.y, header_right, Style::default().bg(Color::DarkGray).fg(Color::DarkGray));
+        buf.set_string(right_x, area.y, header_right, hint_style);
     }
 
     if area.height < 3 {
@@ -43,7 +46,12 @@ pub fn render_preview(app: &App, area: Rect, buf: &mut Buffer) {
 
     // Line 1: Separator
     let sep: String = "\u{2500}".repeat(w);
-    buf.set_string(area.x, area.y + 1, &sep, Style::default().bg(Color::DarkGray).fg(Color::Gray));
+    buf.set_string(
+        area.x,
+        area.y + 1,
+        &sep,
+        Style::default().fg(Color::DarkGray),
+    );
 
     // Lines 2+: Transcript entries
     let body_height = (area.height - 2) as usize;
@@ -55,42 +63,84 @@ pub fn render_preview(app: &App, area: Rect, buf: &mut Buffer) {
             area.x,
             area.y + 2,
             msg,
-            Style::default().bg(Color::DarkGray).fg(Color::Gray),
+            Style::default().fg(Color::DarkGray),
         );
         return;
     }
 
-    // Show the tail that fits
-    let start = lines.len().saturating_sub(body_height);
-    for (i, line) in lines[start..].iter().enumerate() {
+    // Scroll support: use preview_scroll_offset to calculate visible window
+    let offset = app.preview_scroll_offset;
+    let total = lines.len();
+
+    // Default view shows tail (most recent at bottom), offset scrolls up from there
+    let end = total.saturating_sub(offset);
+    let start = end.saturating_sub(body_height);
+
+    for (i, line) in lines[start..end].iter().enumerate() {
         let y = area.y + 2 + i as u16;
         if y >= area.y + area.height {
             break;
         }
+        render_line(line, area.x, y, w, buf);
+    }
 
-        let style = entry_style(line);
-        // Truncate to width
-        let display = if line.chars().count() > w.saturating_sub(1) {
-            let truncated: String = line.chars().take(w.saturating_sub(1)).collect();
-            format!(" {truncated}")
-        } else {
-            format!(" {line}")
-        };
-        buf.set_string(area.x, y, &display, style);
+    // Scroll indicator: when offset > 0, show "↓↓ more" in bottom-right
+    if offset > 0 {
+        let indicator = "\u{2193}\u{2193} more";
+        let indicator_style = Style::default().fg(Color::Yellow);
+        if w > indicator.chars().count() {
+            let ix = area.x + (w - indicator.chars().count()) as u16;
+            let iy = area.y + area.height - 1;
+            buf.set_string(ix, iy, indicator, indicator_style);
+        }
     }
 }
 
-/// Determine the style for a preview line based on its prefix.
-fn entry_style(line: &str) -> Style {
-    let bg = Color::DarkGray;
-    if line.starts_with("User:") {
-        Style::default().bg(bg).fg(Color::White).add_modifier(Modifier::BOLD)
-    } else if line.starts_with("Assistant:") {
-        Style::default().bg(bg).fg(Color::Gray)
-    } else if line.starts_with("Tool:") {
-        Style::default().bg(bg).fg(Color::Cyan)
-    } else {
-        Style::default().bg(bg).fg(Color::Gray)
+/// Render a single PreviewLine into the buffer at the given position.
+fn render_line(line: &PreviewLine, x: u16, y: u16, max_width: usize, buf: &mut Buffer) {
+    match line {
+        PreviewLine::User(text) => {
+            let label = "User ";
+            let label_style = Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD);
+            let text_style = Style::default().fg(Color::White);
+            buf.set_string(x + 1, y, label, label_style);
+            let text_x = x + 1 + label.len() as u16;
+            let remaining = max_width.saturating_sub(1 + label.len());
+            let display: String = text.chars().take(remaining).collect();
+            buf.set_string(text_x, y, &display, text_style);
+        }
+        PreviewLine::Assistant(text) => {
+            let label = "Assistant ";
+            let label_style = Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD);
+            let text_style = Style::default().fg(Color::Gray);
+            buf.set_string(x + 1, y, label, label_style);
+            let text_x = x + 1 + label.len() as u16;
+            let remaining = max_width.saturating_sub(1 + label.len());
+            let display: String = text.chars().take(remaining).collect();
+            buf.set_string(text_x, y, &display, text_style);
+        }
+        PreviewLine::Tool { name, desc } => {
+            let label = "Tool ";
+            let label_style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            let name_style = Style::default().fg(Color::Cyan);
+            let desc_style = Style::default().fg(Color::DarkGray);
+            buf.set_string(x + 1, y, label, label_style);
+            let name_x = x + 1 + label.len() as u16;
+            buf.set_string(name_x, y, name, name_style);
+            let desc_x = name_x + name.len() as u16 + 1;
+            let remaining = max_width.saturating_sub(1 + label.len() + name.len() + 1);
+            let display: String = desc.chars().take(remaining).collect();
+            buf.set_string(desc_x, y, &display, desc_style);
+        }
+        PreviewLine::Separator => {
+            // Blank line — nothing rendered
+        }
     }
 }
 
@@ -113,6 +163,10 @@ mod tests {
         result
     }
 
+    fn cell_fg(buf: &Buffer, x: u16, y: u16) -> Option<Color> {
+        buf[(x, y)].style().fg
+    }
+
     #[test]
     fn render_empty_preview_no_panic() {
         let dir = tempfile::tempdir().unwrap();
@@ -121,19 +175,21 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_preview(&app, area, &mut buf);
         let text = buffer_text(&buf);
-        assert!(text.contains("Preview:"));
         assert!(text.contains("transcript not available"));
     }
 
     #[test]
-    fn render_preview_with_lines() {
+    fn render_preview_with_typed_lines() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_registry_dir(dir.path()).unwrap();
         app.preview_session = Some("test-sess".to_string());
         app.preview_lines = vec![
-            "User: hello".to_string(),
-            "Assistant: hi there".to_string(),
-            "Tool: Edit main.rs".to_string(),
+            PreviewLine::User("hello".to_string()),
+            PreviewLine::Assistant("hi there".to_string()),
+            PreviewLine::Tool {
+                name: "Edit".to_string(),
+                desc: "main.rs".to_string(),
+            },
         ];
 
         let area = Rect::new(0, 0, 80, 10);
@@ -142,9 +198,58 @@ mod tests {
 
         let text = buffer_text(&buf);
         assert!(text.contains("test-sess"));
-        assert!(text.contains("User: hello"));
-        assert!(text.contains("Assistant: hi there"));
-        assert!(text.contains("Tool: Edit main.rs"));
+        assert!(text.contains("hello"));
+        assert!(text.contains("hi there"));
+        assert!(text.contains("Edit"));
+    }
+
+    #[test]
+    fn render_user_line_has_yellow_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.preview_session = Some("s".to_string());
+        app.preview_lines = vec![PreviewLine::User("hi".to_string())];
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+
+        // The "U" of "User " label should be at x=1, y=2 (after header + separator)
+        let fg = cell_fg(&buf, 1, 2);
+        assert_eq!(fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn render_assistant_line_has_green_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.preview_session = Some("s".to_string());
+        app.preview_lines = vec![PreviewLine::Assistant("hi".to_string())];
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+
+        let fg = cell_fg(&buf, 1, 2);
+        assert_eq!(fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn render_tool_line_has_cyan_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.preview_session = Some("s".to_string());
+        app.preview_lines = vec![PreviewLine::Tool {
+            name: "Edit".to_string(),
+            desc: "file.rs".to_string(),
+        }];
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+
+        let fg = cell_fg(&buf, 1, 2);
+        assert_eq!(fg, Some(Color::Cyan));
     }
 
     #[test]
@@ -160,28 +265,59 @@ mod tests {
     fn render_narrow_area_no_panic() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_registry_dir(dir.path()).unwrap();
-        app.preview_lines = vec!["User: a very long message".to_string()];
+        app.preview_lines = vec![PreviewLine::User("a very long message".to_string())];
         let area = Rect::new(0, 0, 10, 5);
         let mut buf = Buffer::empty(area);
         render_preview(&app, area, &mut buf);
     }
 
     #[test]
-    fn entry_style_user_is_bold_white() {
-        let style = entry_style("User: hello");
-        assert_eq!(style.fg, Some(Color::White));
-        assert!(style.add_modifier.contains(Modifier::BOLD));
+    fn separator_renders_as_blank_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.preview_session = Some("s".to_string());
+        app.preview_lines = vec![
+            PreviewLine::User("first".to_string()),
+            PreviewLine::Separator,
+            PreviewLine::Assistant("second".to_string()),
+        ];
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+
+        let text = buffer_text(&buf);
+        assert!(text.contains("first"));
+        assert!(text.contains("second"));
     }
 
     #[test]
-    fn entry_style_assistant_is_gray() {
-        let style = entry_style("Assistant: hello");
-        assert_eq!(style.fg, Some(Color::Gray));
+    fn header_shows_keybinding_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.preview_session = Some("s".to_string());
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+
+        let text = buffer_text(&buf);
+        assert!(text.contains("Esc"));
     }
 
     #[test]
-    fn entry_style_tool_is_cyan() {
-        let style = entry_style("Tool: Edit");
-        assert_eq!(style.fg, Some(Color::Cyan));
+    fn no_dark_gray_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_registry_dir(dir.path()).unwrap();
+        app.preview_session = Some("s".to_string());
+        app.preview_lines = vec![PreviewLine::User("test".to_string())];
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        render_preview(&app, area, &mut buf);
+
+        // Body cell at (1,2) should NOT have DarkGray background
+        let bg = buf[(1u16, 2u16)].style().bg;
+        assert_ne!(bg, Some(Color::DarkGray));
     }
 }

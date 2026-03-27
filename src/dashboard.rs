@@ -88,9 +88,11 @@ pub struct App {
     /// Session name to auto-focus on next watcher reload (set when creating from modal).
     pub pending_focus: Option<String>,
     /// Cached preview lines for the transcript panel.
-    pub preview_lines: Vec<String>,
+    pub preview_lines: Vec<crate::ui::preview::PreviewLine>,
     /// Name of the session being previewed.
     pub preview_session: Option<String>,
+    /// Scroll offset for the preview panel (0 = bottom/most recent).
+    pub preview_scroll_offset: usize,
     /// Byte offsets into transcript files for incremental reading.
     pub transcript_offsets: HashMap<String, u64>,
 }
@@ -139,6 +141,7 @@ impl App {
             pending_focus: None,
             preview_lines: Vec::new(),
             preview_session: None,
+            preview_scroll_offset: 0,
             transcript_offsets: HashMap::new(),
         };
 
@@ -464,6 +467,7 @@ impl App {
     pub fn open_preview(&mut self) {
         if let Some(name) = self.selected_session() {
             self.preview_session = Some(name.to_string());
+            self.preview_scroll_offset = 0;
             self.input_mode = InputMode::Preview;
             self.refresh_preview();
         }
@@ -474,10 +478,12 @@ impl App {
         self.input_mode = InputMode::Normal;
         self.preview_lines.clear();
         self.preview_session = None;
+        self.preview_scroll_offset = 0;
     }
 
     /// Refresh the preview panel by re-reading the transcript tail.
     pub fn refresh_preview(&mut self) {
+        use crate::ui::preview::PreviewLine;
         if let Some(ref name) = self.preview_session {
             if let Some(session) = self.sessions.get(name)
                 && let Some(ref tp) = session.transcript_path
@@ -487,12 +493,25 @@ impl App {
                     let entries = crate::transcript::read_tail_all(path, 50);
                     self.preview_lines = entries
                         .iter()
-                        .map(crate::transcript::format_entry)
+                        .map(|entry| match entry {
+                            crate::transcript::TranscriptEntry::User(text) => {
+                                PreviewLine::User(text.clone())
+                            }
+                            crate::transcript::TranscriptEntry::Assistant(text) => {
+                                PreviewLine::Assistant(text.clone())
+                            }
+                            crate::transcript::TranscriptEntry::Tool(detail) => {
+                                PreviewLine::Tool {
+                                    name: detail.clone(),
+                                    desc: String::new(),
+                                }
+                            }
+                        })
                         .collect();
                     return;
                 }
             }
-            self.preview_lines = vec!["(transcript not available)".to_string()];
+            self.preview_lines = Vec::new();
         }
     }
 
